@@ -1,0 +1,25 @@
+# OS noise
+.DS_Store
+
+# Game dumps and ROM-derived content are never committed, anywhere in the tree.
+# Self-checking test ROMs are pointed at by CMake options, never vendored.
+*.nes
+*.unf
+*.unif
+*.fds
+*.nsf
+
+# Build output, editor caches and scratch
+build/
+build-*/
+.cache/
+tmp/
+*.wav
+
+# Private working docs — local only, never pushed to the public remote.
+docs-internal/
+/CLAUDE.md
+.claude/
+
+# A local convenience symlink to a cartridge library; never part of the repo.
+roms
