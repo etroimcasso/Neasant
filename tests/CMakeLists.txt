@@ -15,8 +15,16 @@ FetchContent_MakeAvailable(googletest)
 
 include(GoogleTest)
 
-# One test executable per phase step, so a failure is attributable to the step
-# that introduced it. This file's targets are the inception baseline.
+# One test executable per area of the library, so a failure names the area it is
+# in.
+
+# The library's version string.
 add_executable(version_test version_test.cpp)
 target_link_libraries(version_test PRIVATE nescore::nescore GTest::gtest_main)
 gtest_discover_tests(version_test DISCOVERY_MODE PRE_TEST)
+
+# The 6502 core: its state value, bus concept, cycle stepping, power-on and reset
+# sequence, and RDY halt.
+add_executable(cpu_state_test cpu/state_test.cpp)
+target_link_libraries(cpu_state_test PRIVATE nescore::nescore GTest::gtest_main)
+gtest_discover_tests(cpu_state_test DISCOVERY_MODE PRE_TEST)

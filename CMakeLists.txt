@@ -41,6 +41,7 @@ endif()
 # ── The library ─────────────────────────────────────────────────────────────
 add_library(nescore STATIC
   src/version.cpp
+  src/cpu/cpu6502.cpp
 )
 add_library(nescore::nescore ALIAS nescore)
 
