@@ -39,7 +39,7 @@ namespace nescore {
 enum class CycleKind : std::uint8_t {
   OpcodeFetch,   // the first byte of an instruction
   OperandFetch,  // an instruction's operand bytes, read at the program counter
-  DataRead,      // the byte an instruction loads
+  DataRead,      // the byte an instruction loads, or a byte of a pointer an indirect mode reads
   DataWrite,     // the byte an instruction stores
   // A read whose value is discarded: the second cycle of an implied instruction,
   // the wrong-page read of an indexed access, a branch's fix-up read, the idle
@@ -370,6 +370,27 @@ class Cpu6502 {
   // NOP (64doc, "Accumulator or implied addressing").
   void applyImplied(Mnemonic mnemonic) noexcept;
 
+  // Applies a read-class operation to the byte its last cycle read: the loads, the
+  // bitwise operators, ADC and SBC, the compares, BIT and NOP.
+  void applyRead(Mnemonic mnemonic, std::uint8_t value) noexcept;
+
+  // Answers the result a read-modify-write operation writes for the byte it read,
+  // setting the flags the operation owns.
+  [[nodiscard]] std::uint8_t modify(Mnemonic mnemonic, std::uint8_t value) noexcept;
+
+  // The byte a write-class instruction stores.
+  [[nodiscard]] std::uint8_t storeValue(Mnemonic mnemonic) const noexcept;
+
+  // Whether a branch's condition holds in the current flags.
+  [[nodiscard]] bool branchTaken(Mnemonic mnemonic) const noexcept;
+
+  // The index register an indexed mode adds: Y for the zero page and absolute Y
+  // forms, X for the others.
+  [[nodiscard]] std::uint8_t indexFor(AddressingMode mode) const noexcept {
+    return (mode == AddressingMode::ZeroPageY || mode == AddressingMode::AbsoluteY) ? state_.y
+                                                                                     : state_.x;
+  }
+
   // ---- reaching the bus ---------------------------------------------------
   // Every read and write the core makes passes through these two. A read while the
   // RDY line is low is issued as a Halted read of the same address and marks the
@@ -435,6 +456,72 @@ class Cpu6502 {
   // NMI, IRQ and BRK, and answers whether it was the last.
   template <CpuBus B>
   bool executeSequenceCycle(B& bus);
+
+  // ---- the instruction sequences ------------------------------------------
+  // One function per addressing mode and per control-flow class. Each executes the
+  // cycle `tcu` names, from the second cycle on, and answers whether it was the
+  // instruction's last.
+
+  // Reads the byte at the program counter as an operand and steps past it.
+  template <CpuBus B>
+  std::uint8_t fetchOperand(B& bus);
+
+  // The read, write and read-modify-write classes, by addressing mode.
+  template <CpuBus B>
+  bool executeAddressedCycle(B& bus, const Opcode& opcode);
+  template <CpuBus B>
+  bool executeImmediateCycle(B& bus, const Opcode& opcode);
+  template <CpuBus B>
+  bool executeZeroPageCycle(B& bus, const Opcode& opcode);
+  template <CpuBus B>
+  bool executeZeroPageIndexedCycle(B& bus, const Opcode& opcode);
+  template <CpuBus B>
+  bool executeAbsoluteCycle(B& bus, const Opcode& opcode);
+  template <CpuBus B>
+  bool executeAbsoluteIndexedCycle(B& bus, const Opcode& opcode);
+  template <CpuBus B>
+  bool executeIndexedIndirectCycle(B& bus, const Opcode& opcode);
+  template <CpuBus B>
+  bool executeIndirectIndexedCycle(B& bus, const Opcode& opcode);
+
+  // The cycle after an index addition into `ea`, in the absolute indexed and
+  // indirect indexed modes.
+  template <CpuBus B>
+  bool pageFixCycle(B& bus, const Opcode& opcode);
+
+  // The cycles at the effective address once it is known; `step` counts them
+  // from 0.
+  template <CpuBus B>
+  bool addressedTailCycle(B& bus, const Opcode& opcode, int step);
+  template <CpuBus B>
+  bool finishRead(B& bus, const Opcode& opcode);
+  template <CpuBus B>
+  bool finishWrite(B& bus, const Opcode& opcode);
+  template <CpuBus B>
+  bool rmwTailCycle(B& bus, const Opcode& opcode, int step);
+
+  // The control-flow classes.
+  template <CpuBus B>
+  bool executeBranchCycle(B& bus, const Opcode& opcode);
+  template <CpuBus B>
+  bool executeJumpCycle(B& bus, const Opcode& opcode);
+  template <CpuBus B>
+  bool executeCallCycle(B& bus);
+  template <CpuBus B>
+  bool executeReturnCycle(B& bus);
+  template <CpuBus B>
+  bool executeReturnFromInterruptCycle(B& bus);
+  template <CpuBus B>
+  bool executePushCycle(B& bus, const Opcode& opcode);
+  template <CpuBus B>
+  bool executePullCycle(B& bus, const Opcode& opcode);
+
+  // Loads a status byte pulled by PLP or RTI. Bits 4 and 5 keep the values they
+  // had (NESdev wiki, "Instruction reference", PLP and RTI).
+  void pullStatus(std::uint8_t pulled) noexcept {
+    constexpr std::uint8_t kKept = kCpuFlagU | kCpuFlagB;
+    state_.p = static_cast<std::uint8_t>((pulled & ~kKept) | (state_.p & kKept));
+  }
 
   // Where the running sequence reads its vector (NESdev wiki, "CPU interrupts",
   // Interrupt hijacking).
@@ -549,14 +636,33 @@ bool Cpu6502::executeCycle(B& bus) {
       busRead(bus, state_.pc, CycleKind::DummyRead);
       applyImplied(opcode.mnemonic);
       return true;
+    case AccessClass::Read:
+    case AccessClass::Write:
+    case AccessClass::ReadModifyWrite:
+      return executeAddressedCycle(bus, opcode);
+    case AccessClass::Branch:
+      return executeBranchCycle(bus, opcode);
+    case AccessClass::Jump:
+      return executeJumpCycle(bus, opcode);
+    case AccessClass::Call:
+      return executeCallCycle(bus);
+    case AccessClass::Return:
+      return executeReturnCycle(bus);
+    case AccessClass::ReturnFromInterrupt:
+      return executeReturnFromInterruptCycle(bus);
+    case AccessClass::Push:
+      return executePushCycle(bus, opcode);
+    case AccessClass::Pull:
+      return executePullCycle(bus, opcode);
     case AccessClass::Break:
       return executeSequenceCycle(bus);
-    default:
+    case AccessClass::Jam:
       // An opcode whose sequence is not in this file runs the two-cycle implied
       // shape and changes no register.
       busRead(bus, state_.pc, CycleKind::DummyRead);
       return true;
   }
+  return true;
 }
 
 // The sequence shared by reset, NMI, IRQ and BRK. Cycle 1 is the boundary cycle and
@@ -613,6 +719,393 @@ bool Cpu6502::executeSequenceCycle(B& bus) {
       state_.pc = static_cast<std::uint16_t>(state_.data | (high << 8));
       state_.servicing = CpuSequence::None;
       state_.polled = CpuSequence::None;
+      return true;
+    }
+  }
+}
+
+// ---- the instruction sequences, defined ---------------------------------------
+
+template <CpuBus B>
+std::uint8_t Cpu6502::fetchOperand(B& bus) {
+  const std::uint8_t value = busRead(bus, state_.pc, CycleKind::OperandFetch);
+  state_.pc = static_cast<std::uint16_t>(state_.pc + 1);
+  return value;
+}
+
+template <CpuBus B>
+bool Cpu6502::executeAddressedCycle(B& bus, const Opcode& opcode) {
+  switch (opcode.mode) {
+    case AddressingMode::Immediate:
+      return executeImmediateCycle(bus, opcode);
+    case AddressingMode::ZeroPage:
+      return executeZeroPageCycle(bus, opcode);
+    case AddressingMode::ZeroPageX:
+    case AddressingMode::ZeroPageY:
+      return executeZeroPageIndexedCycle(bus, opcode);
+    case AddressingMode::Absolute:
+      return executeAbsoluteCycle(bus, opcode);
+    case AddressingMode::AbsoluteX:
+    case AddressingMode::AbsoluteY:
+      return executeAbsoluteIndexedCycle(bus, opcode);
+    case AddressingMode::IndexedIndirect:
+      return executeIndexedIndirectCycle(bus, opcode);
+    case AddressingMode::IndirectIndexed:
+      return executeIndirectIndexedCycle(bus, opcode);
+    case AddressingMode::Implied:
+    case AddressingMode::Accumulator:
+    case AddressingMode::Relative:
+    case AddressingMode::Indirect:
+      // The opcode table pairs the read, write and read-modify-write classes only
+      // with the modes above, which the table's definition checks at compile time.
+      break;
+  }
+  busRead(bus, state_.pc, CycleKind::DummyRead);
+  return true;
+}
+
+// 64doc, "Immediate addressing".
+template <CpuBus B>
+bool Cpu6502::executeImmediateCycle(B& bus, const Opcode& opcode) {
+  applyRead(opcode.mnemonic, fetchOperand(bus));
+  return true;
+}
+
+// 64doc, "Zero page addressing".
+template <CpuBus B>
+bool Cpu6502::executeZeroPageCycle(B& bus, const Opcode& opcode) {
+  if (state_.tcu == 1) {
+    state_.ea = fetchOperand(bus);
+    return false;
+  }
+  return addressedTailCycle(bus, opcode, state_.tcu - 2);
+}
+
+// 64doc, "Zero page indexed addressing".
+template <CpuBus B>
+bool Cpu6502::executeZeroPageIndexedCycle(B& bus, const Opcode& opcode) {
+  switch (state_.tcu) {
+    case 1:
+      state_.ea = fetchOperand(bus);
+      return false;
+    case 2:
+      busRead(bus, state_.ea, CycleKind::DummyRead);
+      state_.ea = static_cast<std::uint8_t>(state_.ea + indexFor(opcode.mode));
+      return false;
+    default:
+      return addressedTailCycle(bus, opcode, state_.tcu - 3);
+  }
+}
+
+// 64doc, "Absolute addressing".
+template <CpuBus B>
+bool Cpu6502::executeAbsoluteCycle(B& bus, const Opcode& opcode) {
+  switch (state_.tcu) {
+    case 1:
+      state_.ea = fetchOperand(bus);
+      return false;
+    case 2:
+      state_.ea = static_cast<std::uint16_t>(state_.ea | (fetchOperand(bus) << 8));
+      return false;
+    default:
+      return addressedTailCycle(bus, opcode, state_.tcu - 3);
+  }
+}
+
+// 64doc, "Absolute indexed addressing".
+template <CpuBus B>
+bool Cpu6502::executeAbsoluteIndexedCycle(B& bus, const Opcode& opcode) {
+  switch (state_.tcu) {
+    case 1:
+      state_.ea = fetchOperand(bus);
+      return false;
+    case 2: {
+      const unsigned low = state_.ea + unsigned{indexFor(opcode.mode)};
+      state_.ea = static_cast<std::uint16_t>((fetchOperand(bus) << 8) | (low & 0xFFu));
+      state_.pageCross = low > 0xFFu;
+      return false;
+    }
+    case 3:
+      return pageFixCycle(bus, opcode);
+    default:
+      return addressedTailCycle(bus, opcode, state_.tcu - 4);
+  }
+}
+
+// 64doc, "Indexed indirect addressing".
+template <CpuBus B>
+bool Cpu6502::executeIndexedIndirectCycle(B& bus, const Opcode& opcode) {
+  switch (state_.tcu) {
+    case 1:
+      state_.ptr = fetchOperand(bus);
+      return false;
+    case 2:
+      busRead(bus, state_.ptr, CycleKind::DummyRead);
+      state_.ptr = static_cast<std::uint8_t>(state_.ptr + state_.x);
+      return false;
+    case 3:
+      state_.ea = busRead(bus, state_.ptr, CycleKind::DataRead);
+      return false;
+    case 4: {
+      const auto high = busRead(bus, static_cast<std::uint8_t>(state_.ptr + 1), CycleKind::DataRead);
+      state_.ea = static_cast<std::uint16_t>(state_.ea | (high << 8));
+      return false;
+    }
+    default:
+      return addressedTailCycle(bus, opcode, state_.tcu - 5);
+  }
+}
+
+// 64doc, "Indirect indexed addressing".
+template <CpuBus B>
+bool Cpu6502::executeIndirectIndexedCycle(B& bus, const Opcode& opcode) {
+  switch (state_.tcu) {
+    case 1:
+      state_.ptr = fetchOperand(bus);
+      return false;
+    case 2:
+      state_.ea = busRead(bus, state_.ptr, CycleKind::DataRead);
+      return false;
+    case 3: {
+      const auto high = busRead(bus, static_cast<std::uint8_t>(state_.ptr + 1), CycleKind::DataRead);
+      const unsigned low = state_.ea + unsigned{state_.y};
+      state_.ea = static_cast<std::uint16_t>((high << 8) | (low & 0xFFu));
+      state_.pageCross = low > 0xFFu;
+      return false;
+    }
+    case 4:
+      return pageFixCycle(bus, opcode);
+    default:
+      return addressedTailCycle(bus, opcode, state_.tcu - 5);
+  }
+}
+
+// The index was added to the low byte alone, so `ea` is in the base address's
+// page. A read that stayed in that page reads its operand here and ends. Otherwise
+// the cycle reads `ea` and discards it, and a carry moves `ea` to the next page:
+// across a page the read lands one page low, and a write or read-modify-write
+// makes this read whether or not the page changed (64doc, "Absolute indexed
+// addressing" and "Indirect indexed addressing"; 64doc, "6510 features").
+template <CpuBus B>
+bool Cpu6502::pageFixCycle(B& bus, const Opcode& opcode) {
+  if (opcode.access == AccessClass::Read && !state_.pageCross) return finishRead(bus, opcode);
+  busRead(bus, state_.ea, CycleKind::DummyRead);
+  if (state_.pageCross) state_.ea = static_cast<std::uint16_t>(state_.ea + 0x100);
+  return false;
+}
+
+template <CpuBus B>
+bool Cpu6502::addressedTailCycle(B& bus, const Opcode& opcode, int step) {
+  switch (opcode.access) {
+    case AccessClass::Read:
+      return finishRead(bus, opcode);
+    case AccessClass::Write:
+      return finishWrite(bus, opcode);
+    default:
+      return rmwTailCycle(bus, opcode, step);
+  }
+}
+
+// A read-class instruction's last cycle reads its operand at `ea` and applies the
+// operation.
+template <CpuBus B>
+bool Cpu6502::finishRead(B& bus, const Opcode& opcode) {
+  applyRead(opcode.mnemonic, busRead(bus, state_.ea, CycleKind::DataRead));
+  return true;
+}
+
+// A write-class instruction's last cycle stores its value at `ea`.
+template <CpuBus B>
+bool Cpu6502::finishWrite(B& bus, const Opcode& opcode) {
+  busWrite(bus, state_.ea, storeValue(opcode.mnemonic), CycleKind::DataWrite);
+  return true;
+}
+
+// A read-modify-write instruction reads `ea`, writes the value back unmodified
+// while the operation runs, then writes the result (64doc, "6510 features").
+template <CpuBus B>
+bool Cpu6502::rmwTailCycle(B& bus, const Opcode& opcode, int step) {
+  switch (step) {
+    case 0:
+      state_.data = busRead(bus, state_.ea, CycleKind::RmwRead);
+      return false;
+    case 1:
+      busWrite(bus, state_.ea, state_.data, CycleKind::RmwDummyWrite);
+      state_.data = modify(opcode.mnemonic, state_.data);
+      return false;
+    default:
+      busWrite(bus, state_.ea, state_.data, CycleKind::RmwWrite);
+      return true;
+  }
+}
+
+// 64doc, "Relative addressing".
+template <CpuBus B>
+bool Cpu6502::executeBranchCycle(B& bus, const Opcode& opcode) {
+  switch (state_.tcu) {
+    case 1:
+      state_.data = fetchOperand(bus);
+      return !branchTaken(opcode.mnemonic);
+    case 2: {
+      busRead(bus, state_.pc, CycleKind::DummyRead);
+      state_.ea = static_cast<std::uint16_t>(state_.pc + static_cast<std::int8_t>(state_.data));
+      state_.pageCross = ((state_.ea ^ state_.pc) & 0xFF00u) != 0;
+      state_.pc = static_cast<std::uint16_t>((state_.pc & 0xFF00u) | (state_.ea & 0x00FFu));
+      return !state_.pageCross;
+    }
+    default:
+      // A branch across a page reads the target's low byte in the old page, then
+      // takes the target.
+      busRead(bus, state_.pc, CycleKind::DummyRead);
+      state_.pc = state_.ea;
+      return true;
+  }
+}
+
+// JMP absolute (64doc, "Absolute addressing", JMP) and JMP indirect (64doc,
+// "Absolute indirect addressing (JMP)"). The indirect form reads the pointer's
+// second byte from the same page as its first (64doc, "6510 features").
+template <CpuBus B>
+bool Cpu6502::executeJumpCycle(B& bus, const Opcode& opcode) {
+  if (opcode.mode != AddressingMode::Indirect) {
+    if (state_.tcu == 1) {
+      state_.ea = fetchOperand(bus);
+      return false;
+    }
+    const auto high = busRead(bus, state_.pc, CycleKind::OperandFetch);
+    state_.pc = static_cast<std::uint16_t>(state_.ea | (high << 8));
+    return true;
+  }
+  switch (state_.tcu) {
+    case 1:
+      state_.ea = fetchOperand(bus);
+      return false;
+    case 2:
+      state_.ea = static_cast<std::uint16_t>(state_.ea | (fetchOperand(bus) << 8));
+      return false;
+    case 3:
+      state_.data = busRead(bus, state_.ea, CycleKind::DataRead);
+      return false;
+    default: {
+      const auto next = static_cast<std::uint16_t>((state_.ea & 0xFF00u) |
+                                                   ((state_.ea + 1u) & 0x00FFu));
+      const auto high = busRead(bus, next, CycleKind::DataRead);
+      state_.pc = static_cast<std::uint16_t>(state_.data | (high << 8));
+      return true;
+    }
+  }
+}
+
+// JSR pushes the address of its own last byte: the program counter after the low
+// byte is fetched, before the high byte is (64doc, "Instructions accessing the
+// stack", JSR).
+template <CpuBus B>
+bool Cpu6502::executeCallCycle(B& bus) {
+  switch (state_.tcu) {
+    case 1:
+      state_.data = fetchOperand(bus);
+      return false;
+    case 2:
+      busRead(bus, stackAddress(), CycleKind::DummyRead);
+      return false;
+    case 3:
+      pushByte(bus, static_cast<std::uint8_t>(state_.pc >> 8));
+      return false;
+    case 4:
+      pushByte(bus, static_cast<std::uint8_t>(state_.pc));
+      return false;
+    default: {
+      const auto high = busRead(bus, state_.pc, CycleKind::OperandFetch);
+      state_.pc = static_cast<std::uint16_t>(state_.data | (high << 8));
+      return true;
+    }
+  }
+}
+
+// RTS pulls the address JSR pushed and steps past it on its last cycle (64doc,
+// "Instructions accessing the stack", RTS).
+template <CpuBus B>
+bool Cpu6502::executeReturnCycle(B& bus) {
+  switch (state_.tcu) {
+    case 1:
+      busRead(bus, state_.pc, CycleKind::DummyRead);
+      return false;
+    case 2:
+      busRead(bus, stackAddress(), CycleKind::DummyRead);
+      return false;
+    case 3:
+      state_.data = pullByte(bus);
+      return false;
+    case 4: {
+      const auto high = pullByte(bus);
+      state_.pc = static_cast<std::uint16_t>(state_.data | (high << 8));
+      return false;
+    }
+    default:
+      busRead(bus, state_.pc, CycleKind::DummyRead);
+      state_.pc = static_cast<std::uint16_t>(state_.pc + 1);
+      return true;
+  }
+}
+
+// RTI pulls the status, then the program counter, and resumes at that address
+// (64doc, "Instructions accessing the stack", RTI).
+template <CpuBus B>
+bool Cpu6502::executeReturnFromInterruptCycle(B& bus) {
+  switch (state_.tcu) {
+    case 1:
+      busRead(bus, state_.pc, CycleKind::DummyRead);
+      return false;
+    case 2:
+      busRead(bus, stackAddress(), CycleKind::DummyRead);
+      return false;
+    case 3:
+      pullStatus(pullByte(bus));
+      return false;
+    case 4:
+      state_.data = pullByte(bus);
+      return false;
+    default: {
+      const auto high = pullByte(bus);
+      state_.pc = static_cast<std::uint16_t>(state_.data | (high << 8));
+      return true;
+    }
+  }
+}
+
+// PHA pushes A. PHP pushes P with bits 4 and 5 set (64doc, "Instructions accessing
+// the stack", PHA, PHP; NESdev wiki, "Status flags", The B flag).
+template <CpuBus B>
+bool Cpu6502::executePushCycle(B& bus, const Opcode& opcode) {
+  if (state_.tcu == 1) {
+    busRead(bus, state_.pc, CycleKind::DummyRead);
+    return false;
+  }
+  pushByte(bus, opcode.mnemonic == Mnemonic::Pha
+                    ? state_.a
+                    : static_cast<std::uint8_t>(state_.p | kCpuFlagU | kCpuFlagB));
+  return true;
+}
+
+// PLA loads A and sets N and Z from it. PLP loads P, bits 4 and 5 excepted (64doc,
+// "Instructions accessing the stack", PLA, PLP).
+template <CpuBus B>
+bool Cpu6502::executePullCycle(B& bus, const Opcode& opcode) {
+  switch (state_.tcu) {
+    case 1:
+      busRead(bus, state_.pc, CycleKind::DummyRead);
+      return false;
+    case 2:
+      busRead(bus, stackAddress(), CycleKind::DummyRead);
+      return false;
+    default: {
+      const std::uint8_t value = pullByte(bus);
+      if (opcode.mnemonic == Mnemonic::Pla) {
+        state_.a = value;
+        setNZ(state_.a);
+      } else {
+        pullStatus(value);
+      }
       return true;
     }
   }

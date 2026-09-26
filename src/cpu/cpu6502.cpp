@@ -304,6 +304,26 @@ constexpr std::array<std::string_view, 76> kMnemonicNames{{
 static_assert(kMnemonicNames.size() == static_cast<std::size_t>(Mnemonic::Tya) + 1,
               "one spelling per mnemonic");
 
+// Whether every read, write and read-modify-write row names a mode with an address
+// to reach: immediate, zero page, absolute, or one of their indexed and indirect
+// forms.
+constexpr bool addressedRowsHaveAddressedModes() {
+  for (const Opcode& opcode : kOpcodeTable) {
+    const bool addressed = opcode.access == AccessClass::Read ||
+                           opcode.access == AccessClass::Write ||
+                           opcode.access == AccessClass::ReadModifyWrite;
+    const bool modeless = opcode.mode == AddressingMode::Implied ||
+                          opcode.mode == AddressingMode::Accumulator ||
+                          opcode.mode == AddressingMode::Relative ||
+                          opcode.mode == AddressingMode::Indirect;
+    if (addressed && modeless) return false;
+  }
+  return true;
+}
+
+static_assert(addressedRowsHaveAddressedModes(),
+              "a read, write or read-modify-write row names a mode with an address");
+
 }  // namespace
 
 const Opcode& opcodeAt(std::uint8_t code) noexcept { return kOpcodeTable[code]; }
@@ -348,6 +368,72 @@ void Cpu6502::applyImplied(Mnemonic mnemonic) noexcept {
 
     // NOP, and every other mnemonic, which the implied class does not carry.
     default: break;
+  }
+}
+
+// The loads (MCS6500 programming manual, 2.1.1, 7.0 and 7.1), ADC and SBC (2.2.1 and
+// 2.2.2; SBC adds the complement of the operand with the carry in), the bitwise
+// operators (2.2.4), the compares (4.2.1, 7.8 and 7.9) and BIT (4.2.2.1).
+void Cpu6502::applyRead(Mnemonic mnemonic, std::uint8_t value) noexcept {
+  switch (mnemonic) {
+    case Mnemonic::Lda: state_.a = value; setNZ(state_.a); break;
+    case Mnemonic::Ldx: state_.x = value; setNZ(state_.x); break;
+    case Mnemonic::Ldy: state_.y = value; setNZ(state_.y); break;
+    case Mnemonic::And: andOp(value); break;
+    case Mnemonic::Ora: oraOp(value); break;
+    case Mnemonic::Eor: eorOp(value); break;
+    case Mnemonic::Adc: addWithCarry(value, false); break;
+    case Mnemonic::Sbc: addWithCarry(value, true); break;
+    case Mnemonic::Cmp: compareWith(state_.a, value); break;
+    case Mnemonic::Cpx: compareWith(state_.x, value); break;
+    case Mnemonic::Cpy: compareWith(state_.y, value); break;
+    case Mnemonic::Bit: bitOp(value); break;
+    case Mnemonic::Nop: break;
+    // The unofficial read operations are not in this file; they load nothing.
+    default: break;
+  }
+}
+
+// The shifts and rotates (MCS6500 programming manual, 10.1 to 10.4) and INC and DEC
+// (10.7 and 10.8).
+std::uint8_t Cpu6502::modify(Mnemonic mnemonic, std::uint8_t value) noexcept {
+  switch (mnemonic) {
+    case Mnemonic::Asl: return aslOp(value);
+    case Mnemonic::Lsr: return lsrOp(value);
+    case Mnemonic::Rol: return rolOp(value);
+    case Mnemonic::Ror: return rorOp(value);
+    case Mnemonic::Inc: return incOp(value);
+    case Mnemonic::Dec: return decOp(value);
+    // The unofficial read-modify-write operations are not in this file; they write the value back unchanged.
+    default: return value;
+  }
+}
+
+// STA, STX and STY store a register unchanged and set no flag (MCS6500 programming
+// manual, 2.1.2, 7.2 and 7.3).
+std::uint8_t Cpu6502::storeValue(Mnemonic mnemonic) const noexcept {
+  switch (mnemonic) {
+    case Mnemonic::Sta: return state_.a;
+    case Mnemonic::Stx: return state_.x;
+    case Mnemonic::Sty: return state_.y;
+    // The unofficial stores are not in this file; they write $00.
+    default: return 0;
+  }
+}
+
+// Each branch tests one flag, taken when the flag is clear or when it is set
+// (NESdev wiki, "Instruction reference", BCC through BVS).
+bool Cpu6502::branchTaken(Mnemonic mnemonic) const noexcept {
+  switch (mnemonic) {
+    case Mnemonic::Bpl: return (state_.p & kCpuFlagN) == 0;
+    case Mnemonic::Bmi: return (state_.p & kCpuFlagN) != 0;
+    case Mnemonic::Bvc: return (state_.p & kCpuFlagV) == 0;
+    case Mnemonic::Bvs: return (state_.p & kCpuFlagV) != 0;
+    case Mnemonic::Bcc: return (state_.p & kCpuFlagC) == 0;
+    case Mnemonic::Bcs: return (state_.p & kCpuFlagC) != 0;
+    case Mnemonic::Bne: return (state_.p & kCpuFlagZ) == 0;
+    case Mnemonic::Beq: return (state_.p & kCpuFlagZ) != 0;
+    default: return false;
   }
 }
 

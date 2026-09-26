@@ -37,3 +37,10 @@ target_link_libraries(cpu_vectors_test PRIVATE nescore::nescore GTest::gtest_mai
 target_compile_definitions(cpu_vectors_test PRIVATE
   NESCORE_NES6502_VECTORS="${NESCORE_NES6502_VECTORS}")
 gtest_discover_tests(cpu_vectors_test DISCOVERY_MODE PRE_TEST)
+
+# The 6502 core's addressing modes and control-flow sequences, one instruction at a
+# time: cycle counts, every bus access with its kind, and the results. The recording
+# bus is the vector harness's.
+add_executable(cpu_modes_test cpu/modes_test.cpp cpu/vector_harness.cpp)
+target_link_libraries(cpu_modes_test PRIVATE nescore::nescore GTest::gtest_main)
+gtest_discover_tests(cpu_modes_test DISCOVERY_MODE PRE_TEST)
