@@ -28,3 +28,12 @@ gtest_discover_tests(version_test DISCOVERY_MODE PRE_TEST)
 add_executable(cpu_state_test cpu/state_test.cpp)
 target_link_libraries(cpu_state_test PRIVATE nescore::nescore GTest::gtest_main)
 gtest_discover_tests(cpu_state_test DISCOVERY_MODE PRE_TEST)
+
+# The 6502 core against the SingleStepTests nes6502 vector set, one test per opcode
+# file, and the vector reader. An empty NESCORE_NES6502_VECTORS skips each opcode
+# with the variable named.
+add_executable(cpu_vectors_test cpu/vectors_test.cpp cpu/vector_harness.cpp)
+target_link_libraries(cpu_vectors_test PRIVATE nescore::nescore GTest::gtest_main)
+target_compile_definitions(cpu_vectors_test PRIVATE
+  NESCORE_NES6502_VECTORS="${NESCORE_NES6502_VECTORS}")
+gtest_discover_tests(cpu_vectors_test DISCOVERY_MODE PRE_TEST)
