@@ -44,3 +44,10 @@ gtest_discover_tests(cpu_vectors_test DISCOVERY_MODE PRE_TEST)
 add_executable(cpu_modes_test cpu/modes_test.cpp cpu/vector_harness.cpp)
 target_link_libraries(cpu_modes_test PRIVATE nescore::nescore GTest::gtest_main)
 gtest_discover_tests(cpu_modes_test DISCOVERY_MODE PRE_TEST)
+
+# The 6502 core's official operations: the value each leaves and the flags it sets,
+# checked against the programming manual's worked examples. The recording bus is the
+# vector harness's.
+add_executable(cpu_operations_test cpu/operations_test.cpp cpu/vector_harness.cpp)
+target_link_libraries(cpu_operations_test PRIVATE nescore::nescore GTest::gtest_main)
+gtest_discover_tests(cpu_operations_test DISCOVERY_MODE PRE_TEST)
