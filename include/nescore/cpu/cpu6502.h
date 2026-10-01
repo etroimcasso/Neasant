@@ -216,8 +216,11 @@ class Cpu6502 {
 
   // Runs cycles until the next instruction boundary and returns how many it took.
   // Called mid-instruction it finishes the instruction in progress; at a boundary
-  // with a sequence due it runs that sequence. With the RDY line low or the core
-  // jammed no boundary is reachable, so it steps one cycle and returns 1.
+  // with a sequence due it runs that sequence. A cycle that leaves the RDY line
+  // low or the core jammed ends the call, since no boundary is then reachable:
+  // with either already so on entry it steps one cycle and returns 1, and a bus
+  // that drops RDY inside an access ends the call after that cycle with the count
+  // so far.
   template <CpuBus B>
   std::uint32_t stepInstruction(B& bus);
 
@@ -428,10 +431,9 @@ class Cpu6502 {
   // ---- the cycle engine ---------------------------------------------------
   // Samples the interrupt inputs into `polled`: a latched NMI first, then an
   // asserted IRQ while I is clear (NESdev wiki, "CPU interrupts", Detailed
-  // interrupt behavior). It runs at the start of every cycle of an instruction and
-  // never during a hardware sequence, so the poll that decides an instruction's end
-  // is the one at the start of its last cycle: the lines as they stood at the end
-  // of the cycle before it.
+  // interrupt behavior). pollBeforeCycle() decides which cycles poll. The poll
+  // that decides an instruction's end is the one before its last cycle, which
+  // sees the lines as they stood at the end of the cycle before it.
   void poll() noexcept {
     if (state_.nmiPending) {
       state_.polled = CpuSequence::Nmi;
@@ -440,6 +442,27 @@ class Cpu6502 {
     } else {
       state_.polled = CpuSequence::None;
     }
+  }
+
+  // Polls before the cycle `tcu` names of the instruction in progress. Every
+  // cycle polls, with three exceptions (NESdev wiki, "CPU interrupts", Detailed
+  // interrupt behavior; Branch instructions and interrupts): BRK's cycles, which
+  // run the hardware sequence and do not poll; a taken branch's third cycle; and
+  // a branch's fourth cycle, the page fix-up, whose poll keeps a request the poll
+  // before the second cycle found even when the lines no longer show one.
+  void pollBeforeCycle() noexcept {
+    const AccessClass access = opcodeAt(state_.ir).access;
+    if (access == AccessClass::Break) return;
+    if (access == AccessClass::Branch) {
+      if (state_.tcu == 2) return;
+      if (state_.tcu == 3) {
+        const CpuSequence found = state_.polled;
+        poll();
+        if (state_.polled == CpuSequence::None) state_.polled = found;
+        return;
+      }
+    }
+    poll();
   }
 
   // One cycle with RDY already accounted for: a jammed cycle, the first cycle at a
@@ -571,19 +594,11 @@ void Cpu6502::stepCycle(B& bus) {
 
 template <CpuBus B>
 std::uint32_t Cpu6502::stepInstruction(B& bus) {
-  if (!state_.rdyLine || state_.jammed) {
-    stepCycle(bus);
-    return 1;
-  }
   std::uint32_t cycles = 0;
-  if (atInstructionBoundary()) {
-    stepCycle(bus);  // the opcode fetch, or the first cycle of a sequence
-    cycles = 1;
-  }
-  while (!atInstructionBoundary()) {
+  do {
     stepCycle(bus);
     ++cycles;
-  }
+  } while (!atInstructionBoundary() && state_.rdyLine && !state_.jammed);
   return cycles;
 }
 
@@ -620,7 +635,7 @@ void Cpu6502::runCycle(B& bus) {
   if (state_.servicing != CpuSequence::None) {
     last = executeSequenceCycle(bus);
   } else {
-    poll();
+    pollBeforeCycle();
     last = executeCycle(bus);
   }
   state_.tcu = last ? std::uint8_t{0} : static_cast<std::uint8_t>(state_.tcu + 1);
@@ -671,11 +686,13 @@ bool Cpu6502::executeCycle(B& bus) {
 // sequence reads the program counter twice without advancing it, so the address
 // saved is the instruction it interrupted. The three stack cycles push the return
 // address and the status, with B set for BRK and clear for NMI and IRQ; a reset
-// makes them reads, taking S down by three with memory untouched. The vector's two
-// bytes come last, and I is set with the first of them (NESdev wiki, "CPU
-// interrupts", Interrupt hijacking and IRQ and NMI tick-by-tick execution; NESdev
-// wiki, "CPU power up state", References; 64doc, "Instructions accessing the stack",
-// BRK; NESdev wiki, "Status flags", The B flag).
+// makes them reads, taking S down by three with memory untouched. The vector is
+// decided on the fifth cycle: a latched NMI takes over an IRQ or a BRK in progress,
+// and the remaining two cycles read the NMI vector. The vector's two bytes come
+// last, and I is set with the first of them (NESdev wiki, "CPU interrupts",
+// Interrupt hijacking and IRQ and NMI tick-by-tick execution; NESdev wiki, "CPU
+// power up state", References; 64doc, "Instructions accessing the stack", BRK;
+// NESdev wiki, "Status flags", The B flag; MCS6500 programming manual, 9.10).
 template <CpuBus B>
 bool Cpu6502::executeSequenceCycle(B& bus) {
   const bool isBreak = state_.servicing == CpuSequence::None;
@@ -699,7 +716,13 @@ bool Cpu6502::executeSequenceCycle(B& bus) {
       }
       return false;
     }
-    case 4:
+    case 4: {
+      // The vector is decided as this cycle begins: a latched NMI takes over an
+      // IRQ or a BRK in progress, which pushes its own status byte here and then
+      // reads the NMI vector (NESdev wiki, "CPU interrupts", Interrupt hijacking;
+      // MCS6500 programming manual, 9.10). A reset is never taken over.
+      const bool nmiTakesOver =
+          state_.nmiPending && (isBreak || state_.servicing == CpuSequence::Irq);
       if (isReset) {
         busRead(bus, stackAddress(), CycleKind::DummyRead);
         state_.s = static_cast<std::uint8_t>(state_.s - 1);
@@ -708,7 +731,12 @@ bool Cpu6502::executeSequenceCycle(B& bus) {
       } else {
         pushByte(bus, static_cast<std::uint8_t>((state_.p | kCpuFlagU) & ~kCpuFlagB));
       }
+      if (nmiTakesOver) {
+        state_.servicing = CpuSequence::Nmi;
+        state_.nmiPending = false;
+      }
       return false;
+    }
     case 5:
       state_.data = busRead(bus, vectorAddress(), CycleKind::VectorRead);
       state_.p = static_cast<std::uint8_t>(state_.p | kCpuFlagI);

@@ -51,3 +51,10 @@ gtest_discover_tests(cpu_modes_test DISCOVERY_MODE PRE_TEST)
 add_executable(cpu_operations_test cpu/operations_test.cpp cpu/vector_harness.cpp)
 target_link_libraries(cpu_operations_test PRIVATE nescore::nescore GTest::gtest_main)
 gtest_discover_tests(cpu_operations_test DISCOVERY_MODE PRE_TEST)
+
+# The 6502 core's interrupt lines and its halt: when an NMI edge or an IRQ level is taken,
+# the poll's timing, the vector a sequence takes when an NMI arrives inside it, and the DMA
+# units' hold on the CPU through the RDY line. The recording bus is the vector harness's.
+add_executable(cpu_lines_test cpu/lines_test.cpp cpu/vector_harness.cpp)
+target_link_libraries(cpu_lines_test PRIVATE nescore::nescore GTest::gtest_main)
+gtest_discover_tests(cpu_lines_test DISCOVERY_MODE PRE_TEST)
