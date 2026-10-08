@@ -12,7 +12,8 @@ namespace {
 // wiki's matrix ("CPU unofficial opcodes"). The unofficial names follow 64doc except
 // ISC, ALR and TAS, which follow the wiki. `unstable` marks ANE and LXA, whose result
 // includes a chip-dependent constant, and SHA, SHX, SHY and TAS, whose stored value
-// depends on a page cross (64doc, "6510/8502 Undocumented Commands").
+// passes through the high byte of their address (64doc, "6510/8502 Undocumented
+// Commands").
 // Other names in use: ISB for ISC, ASR for ALR, SHS for TAS, XAA for ANE, AXS for
 // SBX, AHX for SHA, STP for JAM, LAX #imm for LXA.
 constexpr std::array<Opcode, 256> kOpcodeTable{{
@@ -324,6 +325,32 @@ constexpr bool addressedRowsHaveAddressedModes() {
 static_assert(addressedRowsHaveAddressedModes(),
               "a read, write or read-modify-write row names a mode with an address");
 
+// Whether every SHA, SHX, SHY and TAS row is absolute indexed or indirect indexed,
+// the modes whose index addition can carry into the next page.
+constexpr bool highByteStoresAreIndexed() {
+  for (const Opcode& opcode : kOpcodeTable) {
+    const bool highByteStore = opcode.mnemonic == Mnemonic::Sha ||
+                               opcode.mnemonic == Mnemonic::Shx ||
+                               opcode.mnemonic == Mnemonic::Shy ||
+                               opcode.mnemonic == Mnemonic::Tas;
+    const bool indexed = opcode.mode == AddressingMode::AbsoluteX ||
+                         opcode.mode == AddressingMode::AbsoluteY ||
+                         opcode.mode == AddressingMode::IndirectIndexed;
+    if (highByteStore && !indexed) return false;
+  }
+  return true;
+}
+
+static_assert(highByteStoresAreIndexed(),
+              "SHA, SHX, SHY and TAS are absolute indexed or indirect indexed");
+
+// The constant ANE and LXA OR into the accumulator ahead of their ANDs (64doc,
+// "6510/8502 Undocumented Commands": A = (A | #$EE) & X & #byte; No More Secrets,
+// "'Magic Constant' group" and "LAX #imm", which advises $EE for emulation). On the
+// chip the value varies with the unit, its temperature and the RDY line; the core
+// holds it fixed.
+constexpr std::uint8_t kUnstableConstant = 0xEE;
+
 }  // namespace
 
 const Opcode& opcodeAt(std::uint8_t code) noexcept { return kOpcodeTable[code]; }
@@ -373,7 +400,10 @@ void Cpu6502::applyImplied(Mnemonic mnemonic) noexcept {
 
 // The loads (MCS6500 programming manual, 2.1.1, 7.0 and 7.1), ADC and SBC (2.2.1 and
 // 2.2.2; SBC adds the complement of the operand with the carry in), the bitwise
-// operators (2.2.4), the compares (4.2.1, 7.8 and 7.9) and BIT (4.2.2.1).
+// operators (2.2.4), the compares (4.2.1, 7.8 and 7.9) and BIT (4.2.2.1); then the
+// unofficial read operations (NESdev wiki, "Programming with unofficial opcodes",
+// Combined operations; 64doc, "6510/8502 Undocumented Commands"; No More Secrets,
+// "LAS (LAR)" and "LAX #imm").
 void Cpu6502::applyRead(Mnemonic mnemonic, std::uint8_t value) noexcept {
   switch (mnemonic) {
     case Mnemonic::Lda: state_.a = value; setNZ(state_.a); break;
@@ -389,13 +419,60 @@ void Cpu6502::applyRead(Mnemonic mnemonic, std::uint8_t value) noexcept {
     case Mnemonic::Cpy: compareWith(state_.y, value); break;
     case Mnemonic::Bit: bitOp(value); break;
     case Mnemonic::Nop: break;
-    // The unofficial read operations are not in this file; they load nothing.
+    // LAX loads A and X together.
+    case Mnemonic::Lax: state_.a = value; state_.x = value; setNZ(value); break;
+    // ANC is AND, then C takes bit 7 of the result.
+    case Mnemonic::Anc: andOp(value); setCarry((state_.a & 0x80u) != 0); break;
+    // ALR is AND, then LSR on the accumulator.
+    case Mnemonic::Alr: andOp(value); state_.a = lsrOp(state_.a); break;
+    // ARR is AND, then a rotate right through the carry; C is bit 6 of the result
+    // and V is bit 6 exclusive-or bit 5.
+    case Mnemonic::Arr: {
+      const auto anded = static_cast<unsigned>(state_.a & value);
+      const unsigned carryIn = (state_.p & kCpuFlagC) ? 0x80u : 0u;
+      state_.a = static_cast<std::uint8_t>((anded >> 1) | carryIn);
+      setNZ(state_.a);
+      setCarry((state_.a & 0x40u) != 0);
+      setOverflow((((state_.a >> 6) ^ (state_.a >> 5)) & 1) != 0);
+      break;
+    }
+    // SBX subtracts the operand from A AND X as a compare does, with no borrow in,
+    // and leaves the difference in X.
+    case Mnemonic::Sbx: {
+      const auto both = static_cast<std::uint8_t>(state_.a & state_.x);
+      compareWith(both, value);
+      state_.x = static_cast<std::uint8_t>(both - value);
+      break;
+    }
+    // ANE ORs the constant into A, then ANDs X and the operand into it.
+    case Mnemonic::Ane:
+      state_.a = static_cast<std::uint8_t>((state_.a | kUnstableConstant) & state_.x & value);
+      setNZ(state_.a);
+      break;
+    // LXA ORs the constant into A, ANDs the operand into it, and loads X with the
+    // result.
+    case Mnemonic::Lxa:
+      state_.a = static_cast<std::uint8_t>((state_.a | kUnstableConstant) & value);
+      state_.x = state_.a;
+      setNZ(state_.a);
+      break;
+    // LAS ANDs the operand into S and loads A and X with the result.
+    case Mnemonic::Las:
+      state_.s = static_cast<std::uint8_t>(state_.s & value);
+      state_.a = state_.s;
+      state_.x = state_.s;
+      setNZ(state_.s);
+      break;
+
+    // The table's read rows name only the mnemonics above.
     default: break;
   }
 }
 
 // The shifts and rotates (MCS6500 programming manual, 10.1 to 10.4) and INC and DEC
-// (10.7 and 10.8).
+// (10.7 and 10.8); then the unofficial combinations, each of which runs one of those
+// on the byte and an accumulator operation on its result (NESdev wiki, "Programming
+// with unofficial opcodes", RMW instructions).
 std::uint8_t Cpu6502::modify(Mnemonic mnemonic, std::uint8_t value) noexcept {
   switch (mnemonic) {
     case Mnemonic::Asl: return aslOp(value);
@@ -404,19 +481,38 @@ std::uint8_t Cpu6502::modify(Mnemonic mnemonic, std::uint8_t value) noexcept {
     case Mnemonic::Ror: return rorOp(value);
     case Mnemonic::Inc: return incOp(value);
     case Mnemonic::Dec: return decOp(value);
-    // The unofficial read-modify-write operations are not in this file; they write the value back unchanged.
+
+    // SLO is ASL then ORA; RLA is ROL then AND; SRE is LSR then EOR.
+    case Mnemonic::Slo: { const std::uint8_t r = aslOp(value); oraOp(r); return r; }
+    case Mnemonic::Rla: { const std::uint8_t r = rolOp(value); andOp(r); return r; }
+    case Mnemonic::Sre: { const std::uint8_t r = lsrOp(value); eorOp(r); return r; }
+    // RRA is ROR then ADC, the add taking the carry the rotate left.
+    case Mnemonic::Rra: { const std::uint8_t r = rorOp(value); addWithCarry(r, false); return r; }
+    // DCP is DEC then CMP; ISC is INC then SBC.
+    case Mnemonic::Dcp: { const std::uint8_t r = decOp(value); compareWith(state_.a, r); return r; }
+    case Mnemonic::Isc: { const std::uint8_t r = incOp(value); addWithCarry(r, true); return r; }
+
+    // The table's read-modify-write rows name only the mnemonics above.
     default: return value;
   }
 }
 
 // STA, STX and STY store a register unchanged and set no flag (MCS6500 programming
-// manual, 2.1.2, 7.2 and 7.3).
+// manual, 2.1.2, 7.2 and 7.3). SAX stores A AND X (NESdev wiki, "Programming with
+// unofficial opcodes", Combined operations). SHA and TAS start from A AND X, SHX from
+// X and SHY from Y, and the cycle that writes them masks that value with the high
+// byte of the address (64doc, "6510/8502 Undocumented Commands").
 std::uint8_t Cpu6502::storeValue(Mnemonic mnemonic) const noexcept {
   switch (mnemonic) {
     case Mnemonic::Sta: return state_.a;
     case Mnemonic::Stx: return state_.x;
     case Mnemonic::Sty: return state_.y;
-    // The unofficial stores are not in this file; they write $00.
+    case Mnemonic::Sax:
+    case Mnemonic::Sha:
+    case Mnemonic::Tas: return static_cast<std::uint8_t>(state_.a & state_.x);
+    case Mnemonic::Shx: return state_.x;
+    case Mnemonic::Shy: return state_.y;
+    // The table's write rows name only the mnemonics above.
     default: return 0;
   }
 }

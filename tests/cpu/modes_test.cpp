@@ -258,8 +258,8 @@ TEST(CpuModes, AbsoluteIndexedReadModifyWriteAcrossAPageIsSevenCycles) {
 }
 
 TEST(CpuModes, AbsoluteIndexedYReadModifyWriteRunsTheSameSequence) {
-  // 64doc, "Absolute indexed addressing". SLO absolute,Y, an unofficial opcode,
-  // whose operation leaves the value unchanged here.
+  // 64doc, "Absolute indexed addressing". SLO absolute,Y, an unofficial opcode
+  // that shifts the byte left.
   auto bus = busWith({{0x0200, 0x1B}, {0x0201, 0xF0}, {0x0202, 0x12}, {0x1310, 0x7F}});
   Cpu6502 cpu(Cpu6502State{.pc = 0x0200, .s = 0xFD, .y = 0x20});
   EXPECT_EQ(cpu.stepInstruction(bus), 7u);
@@ -269,7 +269,7 @@ TEST(CpuModes, AbsoluteIndexedYReadModifyWriteRunsTheSameSequence) {
                           {0x1210, DummyRead},
                           {0x1310, RmwRead},
                           {0x1310, RmwDummyWrite},
-                          {0x1310, RmwWrite, 0x7F}});
+                          {0x1310, RmwWrite, 0xFE}});
 }
 
 TEST(CpuModes, IndexedIndirectReadsTheUnindexedPointerFirst) {
@@ -316,8 +316,8 @@ TEST(CpuModes, IndexedIndirectWriteIsSixCycles) {
 }
 
 TEST(CpuModes, IndexedIndirectReadModifyWriteIsEightCycles) {
-  // 64doc, "Indexed indirect addressing". SLO (zero page,X), an unofficial opcode,
-  // whose operation leaves the value unchanged here.
+  // 64doc, "Indexed indirect addressing". SLO (zero page,X), an unofficial opcode
+  // that shifts the byte left.
   auto bus = busWith({{0x0200, 0x03}, {0x0201, 0xF0}, {0x0010, 0x34}, {0x0011, 0x12},
                       {0x1234, 0x7F}});
   Cpu6502 cpu(Cpu6502State{.pc = 0x0200, .s = 0xFD, .x = 0x20});
@@ -329,7 +329,7 @@ TEST(CpuModes, IndexedIndirectReadModifyWriteIsEightCycles) {
                           {0x0011, DataRead},
                           {0x1234, RmwRead},
                           {0x1234, RmwDummyWrite, 0x7F},
-                          {0x1234, RmwWrite, 0x7F}});
+                          {0x1234, RmwWrite, 0xFE}});
 }
 
 TEST(CpuModes, IndirectIndexedReadWithinThePageIsFiveCycles) {
@@ -388,8 +388,8 @@ TEST(CpuModes, IndirectIndexedWriteAlwaysReadsFirst) {
 }
 
 TEST(CpuModes, IndirectIndexedReadModifyWriteIsEightCycles) {
-  // 64doc, "Indirect indexed addressing". SLO (zero page),Y, an unofficial opcode,
-  // whose operation leaves the value unchanged here.
+  // 64doc, "Indirect indexed addressing". SLO (zero page),Y, an unofficial opcode
+  // that shifts the byte left.
   auto bus = busWith({{0x0200, 0x13}, {0x0201, 0x10}, {0x0010, 0xF0}, {0x0011, 0x12},
                       {0x1310, 0x7F}});
   Cpu6502 cpu(Cpu6502State{.pc = 0x0200, .s = 0xFD, .y = 0x20});
@@ -401,7 +401,7 @@ TEST(CpuModes, IndirectIndexedReadModifyWriteIsEightCycles) {
                           {0x1210, DummyRead},
                           {0x1310, RmwRead},
                           {0x1310, RmwDummyWrite},
-                          {0x1310, RmwWrite, 0x7F}});
+                          {0x1310, RmwWrite, 0xFE}});
 }
 
 // ---- branches --------------------------------------------------------------------

@@ -58,3 +58,10 @@ gtest_discover_tests(cpu_operations_test DISCOVERY_MODE PRE_TEST)
 add_executable(cpu_lines_test cpu/lines_test.cpp cpu/vector_harness.cpp)
 target_link_libraries(cpu_lines_test PRIVATE nescore::nescore GTest::gtest_main)
 gtest_discover_tests(cpu_lines_test DISCOVERY_MODE PRE_TEST)
+
+# The 6502 core's unofficial opcodes: the combined operations' results and flags, the
+# stores whose value passes through the high byte of their address, and the halt a JAM
+# opcode brings. The recording bus is the vector harness's.
+add_executable(cpu_unofficial_test cpu/unofficial_test.cpp cpu/vector_harness.cpp)
+target_link_libraries(cpu_unofficial_test PRIVATE nescore::nescore GTest::gtest_main)
+gtest_discover_tests(cpu_unofficial_test DISCOVERY_MODE PRE_TEST)

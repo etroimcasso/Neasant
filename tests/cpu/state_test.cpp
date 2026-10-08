@@ -178,6 +178,7 @@ TEST(CpuState, RdyLowOnNopsSecondCycleRepeatsThatReadAsHalted) {
   cpu.stepCycle(bus);  // the opcode fetch
   cpu.setRdyLine(false);
   Cpu6502State held = cpu.state();
+  held.rdyHeld = true;  // the one mark a held cycle leaves
   for (int i = 0; i < 3; ++i) cpu.stepCycle(bus);
   ASSERT_EQ(bus.trace.size(), 4u);
   for (std::size_t i = 1; i < 4; ++i) expectAccess(bus.trace[i], 0x0201, CycleKind::Halted);
@@ -189,6 +190,7 @@ TEST(CpuState, RdyLowOnNopsSecondCycleRepeatsThatReadAsHalted) {
   ASSERT_EQ(bus.trace.size(), 5u);
   expectAccess(bus.trace[4], 0x0201, CycleKind::DummyRead);
   EXPECT_TRUE(cpu.atInstructionBoundary());
+  EXPECT_FALSE(cpu.state().rdyHeld);
 }
 
 TEST(CpuState, RdyLowHoldsTheOpcodeFetch) {
@@ -197,7 +199,8 @@ TEST(CpuState, RdyLowHoldsTheOpcodeFetch) {
   auto bus = busWith({{0x0200, kNop}});
   Cpu6502 cpu(Cpu6502State{.pc = 0x0200, .s = 0xFD, .ir = 0x18});
   cpu.setRdyLine(false);
-  const Cpu6502State held = cpu.state();
+  Cpu6502State held = cpu.state();
+  held.rdyHeld = true;  // the one mark a held cycle leaves
   cpu.stepCycle(bus);
   ASSERT_EQ(bus.trace.size(), 1u);
   expectAccess(bus.trace[0], 0x0200, CycleKind::Halted);

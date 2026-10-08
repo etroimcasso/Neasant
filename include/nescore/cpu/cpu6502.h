@@ -110,6 +110,7 @@ struct Cpu6502State {
   bool nmiPending = false;  // latched by the NMI line becoming asserted; cleared when taken
   bool irqLine = false;     // the IRQ line's level, true while asserted
   bool rdyLine = true;      // the RDY line; false halts the core on its next read
+  bool rdyHeld = false;     // RDY has held the cycle under way; cleared when a cycle completes
   // The sequence the last interrupt poll asked for, taken at the next boundary.
   CpuSequence polled = CpuSequence::None;
   // The hardware sequence in progress, or pending at a boundary.
@@ -374,15 +375,25 @@ class Cpu6502 {
   void applyImplied(Mnemonic mnemonic) noexcept;
 
   // Applies a read-class operation to the byte its last cycle read: the loads, the
-  // bitwise operators, ADC and SBC, the compares, BIT and NOP.
+  // bitwise operators, ADC and SBC, the compares, BIT, NOP and the unofficial read
+  // operations.
   void applyRead(Mnemonic mnemonic, std::uint8_t value) noexcept;
 
   // Answers the result a read-modify-write operation writes for the byte it read,
-  // setting the flags the operation owns.
+  // setting the flags the operation owns. An unofficial combination also applies its
+  // accumulator operation to that result.
   [[nodiscard]] std::uint8_t modify(Mnemonic mnemonic, std::uint8_t value) noexcept;
 
-  // The byte a write-class instruction stores.
+  // The value a write-class instruction stores: a register, or A AND X for SAX, SHA
+  // and TAS.
   [[nodiscard]] std::uint8_t storeValue(Mnemonic mnemonic) const noexcept;
+
+  // Whether a store is SHA, SHX, SHY or TAS, whose value passes through the high
+  // byte of its address.
+  [[nodiscard]] static constexpr bool storesThroughHighByte(Mnemonic mnemonic) noexcept {
+    return mnemonic == Mnemonic::Sha || mnemonic == Mnemonic::Shx ||
+           mnemonic == Mnemonic::Shy || mnemonic == Mnemonic::Tas;
+  }
 
   // Whether a branch's condition holds in the current flags.
   [[nodiscard]] bool branchTaken(Mnemonic mnemonic) const noexcept;
@@ -538,6 +549,8 @@ class Cpu6502 {
   bool executePushCycle(B& bus, const Opcode& opcode);
   template <CpuBus B>
   bool executePullCycle(B& bus, const Opcode& opcode);
+  template <CpuBus B>
+  bool executeJamCycle(B& bus);
 
   // Loads a status byte pulled by PLP or RTI. Bits 4 and 5 keep the values they
   // had (NESdev wiki, "Instruction reference", PLP and RTI).
@@ -570,6 +583,7 @@ template <CpuBus B>
 void Cpu6502::stepCycle(B& bus) {
   if (state_.rdyLine) {
     runCycle(bus);
+    state_.rdyHeld = false;
     return;
   }
   const Cpu6502State before = state_;
@@ -577,10 +591,14 @@ void Cpu6502::stepCycle(B& bus) {
   runCycle(bus);
   // A write cycle proceeds regardless of RDY (NESdev wiki, "DMA", Behavior; 64doc,
   // "6510 features": -RDY is ignored during writes).
-  if (!halted_) return;
+  if (!halted_) {
+    state_.rdyHeld = false;
+    return;
+  }
   // A read cycle under RDY low did not happen: everything the cycle changed is put
-  // back, except the line inputs, which the bus may have driven during the call.
-  // The next cycle repeats the same read (NESdev wiki, "DMA", Behavior).
+  // back, except the line inputs, which the bus may have driven during the call, and
+  // `rdyHeld`, which records the hold for the cycle to read when it runs. The next
+  // cycle repeats the same read (NESdev wiki, "DMA", Behavior).
   const bool nmiLine = state_.nmiLine;
   const bool nmiPending = state_.nmiPending;
   const bool irqLine = state_.irqLine;
@@ -590,6 +608,7 @@ void Cpu6502::stepCycle(B& bus) {
   state_.nmiPending = nmiPending;
   state_.irqLine = irqLine;
   state_.rdyLine = rdyLine;
+  state_.rdyHeld = true;
 }
 
 template <CpuBus B>
@@ -672,10 +691,7 @@ bool Cpu6502::executeCycle(B& bus) {
     case AccessClass::Break:
       return executeSequenceCycle(bus);
     case AccessClass::Jam:
-      // An opcode whose sequence is not in this file runs the two-cycle implied
-      // shape and changes no register.
-      busRead(bus, state_.pc, CycleKind::DummyRead);
-      return true;
+      return executeJamCycle(bus);
   }
   return true;
 }
@@ -913,11 +929,19 @@ bool Cpu6502::executeIndirectIndexedCycle(B& bus, const Opcode& opcode) {
 // the cycle reads `ea` and discards it, and a carry moves `ea` to the next page:
 // across a page the read lands one page low, and a write or read-modify-write
 // makes this read whether or not the page changed (64doc, "Absolute indexed
-// addressing" and "Indirect indexed addressing"; 64doc, "6510 features").
+// addressing" and "Indirect indexed addressing"; 64doc, "6510 features"). For SHA,
+// SHX, SHY and TAS the cycle also latches in `data` the mask their store applies:
+// the named high byte plus one, or every bit when the RDY line held this cycle
+// before it ran (No More Secrets, "'unstable address high byte' group"; NESdev wiki,
+// "Programming with unofficial opcodes", Unimplemented addressing modes).
 template <CpuBus B>
 bool Cpu6502::pageFixCycle(B& bus, const Opcode& opcode) {
   if (opcode.access == AccessClass::Read && !state_.pageCross) return finishRead(bus, opcode);
   busRead(bus, state_.ea, CycleKind::DummyRead);
+  if (storesThroughHighByte(opcode.mnemonic)) {
+    state_.data = state_.rdyHeld ? std::uint8_t{0xFF}
+                                 : static_cast<std::uint8_t>((state_.ea >> 8) + 1);
+  }
   if (state_.pageCross) state_.ea = static_cast<std::uint16_t>(state_.ea + 0x100);
   return false;
 }
@@ -942,10 +966,30 @@ bool Cpu6502::finishRead(B& bus, const Opcode& opcode) {
   return true;
 }
 
-// A write-class instruction's last cycle stores its value at `ea`.
+// A write-class instruction's last cycle stores its value at `ea`. SHA, SHX, SHY and
+// TAS store their register value ANDed with the mask the page-fix cycle latched in
+// `data`, which is the high byte of the address the instruction names, plus one,
+// unless a hold dropped it. When the index addition carried into the next page, the
+// register value ANDed with that named high byte plus one also replaces the high
+// byte of `ea`, so the write lands in the page it names whatever the mask was
+// (64doc, "6510/8502 Undocumented Commands"; No More Secrets, "'unstable address
+// high byte' group"; NESdev wiki, "Programming with unofficial opcodes",
+// Unimplemented addressing modes). TAS loads S with A AND X on the same cycle.
 template <CpuBus B>
 bool Cpu6502::finishWrite(B& bus, const Opcode& opcode) {
-  busWrite(bus, state_.ea, storeValue(opcode.mnemonic), CycleKind::DataWrite);
+  std::uint8_t value = storeValue(opcode.mnemonic);
+  if (storesThroughHighByte(opcode.mnemonic)) {
+    if (opcode.mnemonic == Mnemonic::Tas) state_.s = value;
+    // `ea` holds the carried page after a page cross, so its high byte is already
+    // the named one plus one.
+    const unsigned namedPlusOne = (state_.ea >> 8) + (state_.pageCross ? 0u : 1u);
+    if (state_.pageCross) {
+      const unsigned high = (value & namedPlusOne) << 8;
+      state_.ea = static_cast<std::uint16_t>(high | (state_.ea & 0x00FFu));
+    }
+    value = static_cast<std::uint8_t>(value & state_.data);
+  }
+  busWrite(bus, state_.ea, value, CycleKind::DataWrite);
   return true;
 }
 
@@ -1136,6 +1180,35 @@ bool Cpu6502::executePullCycle(B& bus, const Opcode& opcode) {
       }
       return true;
     }
+  }
+}
+
+// A JAM opcode reads the byte after it and halts the core: the address bus settles
+// on the top of memory, no interrupt is taken, and only a reset restarts execution
+// (No More Secrets, "JAM (KIL, HLT, CIM, CRP)"; NESdev wiki, "CPU unofficial
+// opcodes"; 64doc, "Different CPU types"). Cycles 4 and 5 read $FFFE before the bus
+// settles (Visual6502, the simulation of opcode $02 that No More Secrets links). The
+// program counter steps past the byte after the opcode; the other registers and the
+// flags are left as they were.
+template <CpuBus B>
+bool Cpu6502::executeJamCycle(B& bus) {
+  switch (state_.tcu) {
+    case 1:
+      busRead(bus, state_.pc, CycleKind::DummyRead);
+      state_.pc = static_cast<std::uint16_t>(state_.pc + 1);
+      return false;
+    case 2:
+      busRead(bus, 0xFFFF, CycleKind::DummyRead);
+      return false;
+    case 3:
+    case 4:
+      busRead(bus, 0xFFFE, CycleKind::DummyRead);
+      return false;
+    default:
+      state_.ea = 0xFFFF;
+      busRead(bus, state_.ea, CycleKind::DummyRead);
+      state_.jammed = true;
+      return false;
   }
 }
 

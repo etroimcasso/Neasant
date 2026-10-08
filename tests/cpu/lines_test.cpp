@@ -26,7 +26,6 @@ using nescore::Cpu6502State;
 using nescore::CpuSequence;
 using nescore::CycleKind;
 using nescore::kCpuFlagI;
-using nescore::kCpuFlagN;
 using nescore::kCpuFlagU;
 using nescore::kCpuFlagZ;
 using nescore::cpu_vectors::Access;
