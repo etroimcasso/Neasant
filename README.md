@@ -43,12 +43,12 @@ anything, under MIT, with clean provenance.
 
 ## What is built
 
-Nothing yet. The repository holds the build skeleton, the test harness and the documentation
-index. This table fills in one row per component as each lands.
+The CPU is built and documented; the rest of the machine follows it. This table gains a row's
+link and description as each component lands.
 
 | Component | Status |
 |---|---|
-| 6502 CPU core | **not started** |
+| [6502 CPU core](docs/6502-cpu.md) | **complete** — 256 opcodes, cycle-stepped, every cycle checked against the SingleStepTests nes6502 vectors; the reset, interrupt and RDY-halt sequences cycle by cycle |
 | Machine (bus, RAM, cartridge boundary, controllers) | **not started** |
 | PPU | **not started** |
 | APU | **not started** |

@@ -865,7 +865,7 @@ bool Cpu6502::executeAbsoluteIndexedCycle(B& bus, const Opcode& opcode) {
       return false;
     case 2: {
       const unsigned low = state_.ea + unsigned{indexFor(opcode.mode)};
-      state_.ea = static_cast<std::uint16_t>((fetchOperand(bus) << 8) | (low & 0xFFu));
+      state_.ea = static_cast<std::uint16_t>((unsigned{fetchOperand(bus)} << 8) | (low & 0xFFu));
       state_.pageCross = low > 0xFFu;
       return false;
     }
@@ -913,7 +913,7 @@ bool Cpu6502::executeIndirectIndexedCycle(B& bus, const Opcode& opcode) {
     case 3: {
       const auto high = busRead(bus, static_cast<std::uint8_t>(state_.ptr + 1), CycleKind::DataRead);
       const unsigned low = state_.ea + unsigned{state_.y};
-      state_.ea = static_cast<std::uint16_t>((high << 8) | (low & 0xFFu));
+      state_.ea = static_cast<std::uint16_t>((unsigned{high} << 8) | (low & 0xFFu));
       state_.pageCross = low > 0xFFu;
       return false;
     }
