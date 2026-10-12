@@ -1,4 +1,4 @@
-# nescore documentation
+# Neasant documentation
 
 These pages describe what is built and how to use it. Every value in them is derived from public
 hardware documentation and validated against it. Where the published documentation is incomplete,
@@ -10,11 +10,11 @@ and what is unstarted.
 
 ## Pages
 
-No component pages exist yet. Each lands with its component, one row here per page:
+One row per page; each page lands with its component:
 
 | Page | Covers |
 |---|---|
-| — | — |
+| [6502-cpu.md](6502-cpu.md) | The 2A03's CPU core — its bus and state, stepping it a cycle or an instruction at a time, where every cycle of every addressing mode goes, the interrupt, reset and halt sequences, the unofficial opcodes, and the vector suite |
 
 ## Reading these pages
 

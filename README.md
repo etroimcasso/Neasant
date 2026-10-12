@@ -1,26 +1,15 @@
-# nescore
+# Neasant
 
 A clean-room, MIT-licensed implementation of the NES — cycle-accurate, deterministic, and
-embeddable.
-
-The name `nescore` is a placeholder. It is used consistently for the namespace, the header
-directory and the library target so that the eventual name is a single rename.
+embeddable. Pronounced "NESn't," like Peasant with an N.
 
 ## Contents
 
-- [Why this exists](#why-this-exists)
 - [Design commitments](#design-commitments)
 - [What is built](#what-is-built)
 - [Getting started](#getting-started)
 - [Documentation](#documentation)
 - [License](#license)
-
-## Why this exists
-
-There is no MIT-compatible, cycle-accurate, embeddable NES core. The established emulators are
-exceptional work, but their licenses keep them out of permissively-licensed engines, tools and
-commercial products. This project fills that gap: a NES implementation you can vendor into
-anything, under MIT, with clean provenance.
 
 ## Design commitments
 
@@ -43,12 +32,12 @@ anything, under MIT, with clean provenance.
 
 ## What is built
 
-Nothing yet. The repository holds the build skeleton, the test harness and the documentation
-index. This table fills in one row per component as each lands.
+The CPU is built and documented; the rest of the machine follows it. This table gains a row's
+link and description as each component lands.
 
 | Component | Status |
 |---|---|
-| 6502 CPU core | **not started** |
+| [6502 CPU core](docs/6502-cpu.md) | **complete** — 256 opcodes, cycle-stepped, every cycle checked against the SingleStepTests nes6502 vectors; the reset, interrupt and RDY-halt sequences cycle by cycle |
 | Machine (bus, RAM, cartridge boundary, controllers) | **not started** |
 | PPU | **not started** |
 | APU | **not started** |
@@ -75,8 +64,8 @@ Vendor the repository (a git submodule works) and link the library target. The t
 off when the library is built inside a parent project.
 
 ```cmake
-add_subdirectory(nescore)
-target_link_libraries(your_target PRIVATE nescore::nescore)
+add_subdirectory(neasant)
+target_link_libraries(your_target PRIVATE neasant::neasant)
 ```
 
 ### The test data
@@ -86,13 +75,13 @@ visible reason, until they are pointed at a local copy.
 
 | Option | Points at |
 |---|---|
-| `NESCORE_NES6502_VECTORS` | the SingleStepTests `65x02/nes6502/v1` directory |
+| `NEASANT_NES6502_VECTORS` | the SingleStepTests `65x02/nes6502/v1` directory |
 
 ```
-cmake -B build -DNESCORE_NES6502_VECTORS=/path/to/65x02/nes6502/v1
+cmake -B build -DNEASANT_NES6502_VECTORS=/path/to/65x02/nes6502/v1
 ```
 
-`NESCORE_BUILD_TESTS` turns the suite on or off explicitly.
+`NEASANT_BUILD_TESTS` turns the suite on or off explicitly.
 
 ## Documentation
 

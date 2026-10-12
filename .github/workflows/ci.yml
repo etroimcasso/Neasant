@@ -13,7 +13,7 @@ env:
 
 # The oracle vectors (SingleStepTests 65x02, the nes6502 set) are never committed.
 # Each job checks out only that directory of the repository once into the runner's
-# home and reuses it warm on later runs. NESCORE_REQUIRE_NES6502_VECTORS turns an
+# home and reuses it warm on later runs. NEASANT_REQUIRE_NES6502_VECTORS turns an
 # absent vector set into a hard failure, so a green run has provably executed the
 # whole oracle rather than skipping it — the point of running on every architecture
 # is to prove the interpreter produces identical results on each.
@@ -33,7 +33,7 @@ jobs:
       - name: Stage nes6502 vectors
         run: |
           set -eo pipefail
-          VECS="$HOME/nescore-65x02-vectors"
+          VECS="$HOME/neasant-65x02-vectors"
           if [ ! -d "$VECS/nes6502/v1" ]; then
             rm -rf "$VECS"
             git clone --depth 1 --filter=blob:none --sparse https://github.com/SingleStepTests/65x02.git "$VECS"
@@ -45,17 +45,17 @@ jobs:
         run: |
           cmake -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build" \
             -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DNESCORE_NES6502_VECTORS="$NES6502_VECTORS"
+            -DNEASANT_NES6502_VECTORS="$NES6502_VECTORS"
 
       - name: Build
         run: cmake --build "$GITHUB_WORKSPACE/build" --parallel
 
       - name: Stage build for manual testing
-        run: rm -rf /tmp/nescore-build && cp -R "$GITHUB_WORKSPACE/build" /tmp/nescore-build
+        run: rm -rf /tmp/neasant-build && cp -R "$GITHUB_WORKSPACE/build" /tmp/neasant-build
 
       - name: Test
         env:
-          NESCORE_REQUIRE_NES6502_VECTORS: '1'
+          NEASANT_REQUIRE_NES6502_VECTORS: '1'
         run: |
           set -o pipefail
           mkdir -p "$GITHUB_WORKSPACE/ci-output"
@@ -83,7 +83,7 @@ jobs:
       - name: Stage nes6502 vectors
         shell: powershell
         run: |
-          $VECS = "$($env:USERPROFILE -replace '\\','/')/nescore-65x02-vectors"
+          $VECS = "$($env:USERPROFILE -replace '\\','/')/neasant-65x02-vectors"
           if (-not (Test-Path "$VECS/nes6502/v1")) {
             if (Test-Path $VECS) { Remove-Item $VECS -Recurse -Force }
             git clone --depth 1 --filter=blob:none --sparse https://github.com/SingleStepTests/65x02.git $VECS
@@ -94,36 +94,36 @@ jobs:
       - name: Clean CMake cache (preserve downloads)
         shell: powershell
         run: |
-          if (Test-Path C:\nescore-ci-build\CMakeCache.txt) {
-            Remove-Item C:\nescore-ci-build\CMakeCache.txt -Force
+          if (Test-Path C:\neasant-ci-build\CMakeCache.txt) {
+            Remove-Item C:\neasant-ci-build\CMakeCache.txt -Force
           }
-          if (Test-Path C:\nescore-ci-build\CMakeFiles) {
-            Remove-Item C:\nescore-ci-build\CMakeFiles -Recurse -Force
+          if (Test-Path C:\neasant-ci-build\CMakeFiles) {
+            Remove-Item C:\neasant-ci-build\CMakeFiles -Recurse -Force
           }
-          if (Test-Path C:\nescore-ci-build\_deps) {
-            Get-ChildItem C:\nescore-ci-build\_deps -Filter "*-subbuild" -ErrorAction SilentlyContinue |
+          if (Test-Path C:\neasant-ci-build\_deps) {
+            Get-ChildItem C:\neasant-ci-build\_deps -Filter "*-subbuild" -ErrorAction SilentlyContinue |
               Remove-Item -Recurse -Force
           }
 
       - name: Configure
         shell: powershell
         run: |
-          cmake -S $env:GITHUB_WORKSPACE -B C:\nescore-ci-build `
+          cmake -S $env:GITHUB_WORKSPACE -B C:\neasant-ci-build `
             -G "Visual Studio 17 2022" -A x64 `
-            -DNESCORE_NES6502_VECTORS="$env:NES6502_VECTORS"
+            -DNEASANT_NES6502_VECTORS="$env:NES6502_VECTORS"
 
       - name: Build
         shell: powershell
-        run: cmake --build C:\nescore-ci-build --config Release --parallel
+        run: cmake --build C:\neasant-ci-build --config Release --parallel
 
       - name: Test
         shell: powershell
         env:
-          NESCORE_REQUIRE_NES6502_VECTORS: '1'
+          NEASANT_REQUIRE_NES6502_VECTORS: '1'
         run: |
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\ci-output" | Out-Null
           $results = "$env:GITHUB_WORKSPACE\ci-output\windows-x64-results.txt"
-          cmd /c "ctest --test-dir C:\nescore-ci-build -C Release --output-on-failure 2>&1" |
+          cmd /c "ctest --test-dir C:\neasant-ci-build -C Release --output-on-failure 2>&1" |
             Tee-Object -FilePath $results
           # Tee-Object does not update $LASTEXITCODE; propagate the ctest exit code
           # explicitly so a test failure fails the step instead of reporting green.
@@ -150,7 +150,7 @@ jobs:
       - name: Stage nes6502 vectors
         run: |
           set -eo pipefail
-          VECS="$HOME/nescore-65x02-vectors"
+          VECS="$HOME/neasant-65x02-vectors"
           if [ ! -d "$VECS/nes6502/v1" ]; then
             rm -rf "$VECS"
             git clone --depth 1 --filter=blob:none --sparse https://github.com/SingleStepTests/65x02.git "$VECS"
@@ -162,17 +162,17 @@ jobs:
         run: |
           cmake -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build" \
             -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DNESCORE_NES6502_VECTORS="$NES6502_VECTORS"
+            -DNEASANT_NES6502_VECTORS="$NES6502_VECTORS"
 
       - name: Build
         run: cmake --build "$GITHUB_WORKSPACE/build" --parallel
 
       - name: Stage build for manual testing
-        run: rm -rf /tmp/nescore-build && cp -R "$GITHUB_WORKSPACE/build" /tmp/nescore-build
+        run: rm -rf /tmp/neasant-build && cp -R "$GITHUB_WORKSPACE/build" /tmp/neasant-build
 
       - name: Test
         env:
-          NESCORE_REQUIRE_NES6502_VECTORS: '1'
+          NEASANT_REQUIRE_NES6502_VECTORS: '1'
         run: |
           set -o pipefail
           mkdir -p "$GITHUB_WORKSPACE/ci-output"
@@ -204,7 +204,7 @@ jobs:
       - name: Stage nes6502 vectors
         run: |
           set -eo pipefail
-          VECS="$HOME/nescore-65x02-vectors"
+          VECS="$HOME/neasant-65x02-vectors"
           if [ ! -d "$VECS/nes6502/v1" ]; then
             rm -rf "$VECS"
             git clone --depth 1 --filter=blob:none --sparse https://github.com/SingleStepTests/65x02.git "$VECS"
@@ -216,17 +216,17 @@ jobs:
         run: |
           cmake -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build" \
             -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DNESCORE_NES6502_VECTORS="$NES6502_VECTORS"
+            -DNEASANT_NES6502_VECTORS="$NES6502_VECTORS"
 
       - name: Build
         run: cmake --build "$GITHUB_WORKSPACE/build" --parallel
 
       - name: Stage build for manual testing
-        run: rm -rf /tmp/nescore-build && cp -R "$GITHUB_WORKSPACE/build" /tmp/nescore-build
+        run: rm -rf /tmp/neasant-build && cp -R "$GITHUB_WORKSPACE/build" /tmp/neasant-build
 
       - name: Test
         env:
-          NESCORE_REQUIRE_NES6502_VECTORS: '1'
+          NEASANT_REQUIRE_NES6502_VECTORS: '1'
         run: |
           set -o pipefail
           mkdir -p "$GITHUB_WORKSPACE/ci-output"
@@ -256,7 +256,7 @@ jobs:
       - name: Stage nes6502 vectors
         shell: powershell
         run: |
-          $VECS = "$($env:USERPROFILE -replace '\\','/')/nescore-65x02-vectors"
+          $VECS = "$($env:USERPROFILE -replace '\\','/')/neasant-65x02-vectors"
           if (-not (Test-Path "$VECS/nes6502/v1")) {
             if (Test-Path $VECS) { Remove-Item $VECS -Recurse -Force }
             git clone --depth 1 --filter=blob:none --sparse https://github.com/SingleStepTests/65x02.git $VECS
@@ -267,36 +267,36 @@ jobs:
       - name: Clean CMake cache (preserve downloads)
         shell: powershell
         run: |
-          if (Test-Path C:\nescore-ci-build\CMakeCache.txt) {
-            Remove-Item C:\nescore-ci-build\CMakeCache.txt -Force
+          if (Test-Path C:\neasant-ci-build\CMakeCache.txt) {
+            Remove-Item C:\neasant-ci-build\CMakeCache.txt -Force
           }
-          if (Test-Path C:\nescore-ci-build\CMakeFiles) {
-            Remove-Item C:\nescore-ci-build\CMakeFiles -Recurse -Force
+          if (Test-Path C:\neasant-ci-build\CMakeFiles) {
+            Remove-Item C:\neasant-ci-build\CMakeFiles -Recurse -Force
           }
-          if (Test-Path C:\nescore-ci-build\_deps) {
-            Get-ChildItem C:\nescore-ci-build\_deps -Filter "*-subbuild" -ErrorAction SilentlyContinue |
+          if (Test-Path C:\neasant-ci-build\_deps) {
+            Get-ChildItem C:\neasant-ci-build\_deps -Filter "*-subbuild" -ErrorAction SilentlyContinue |
               Remove-Item -Recurse -Force
           }
 
       - name: Configure
         shell: powershell
         run: |
-          cmake -S $env:GITHUB_WORKSPACE -B C:\nescore-ci-build `
+          cmake -S $env:GITHUB_WORKSPACE -B C:\neasant-ci-build `
             -G "Visual Studio 17 2022" -A ARM64 `
-            -DNESCORE_NES6502_VECTORS="$env:NES6502_VECTORS"
+            -DNEASANT_NES6502_VECTORS="$env:NES6502_VECTORS"
 
       - name: Build
         shell: powershell
-        run: cmake --build C:\nescore-ci-build --config Release --parallel
+        run: cmake --build C:\neasant-ci-build --config Release --parallel
 
       - name: Test
         shell: powershell
         env:
-          NESCORE_REQUIRE_NES6502_VECTORS: '1'
+          NEASANT_REQUIRE_NES6502_VECTORS: '1'
         run: |
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\ci-output" | Out-Null
           $results = "$env:GITHUB_WORKSPACE\ci-output\windows-arm64-results.txt"
-          cmd /c "ctest --test-dir C:\nescore-ci-build -C Release --output-on-failure 2>&1" |
+          cmd /c "ctest --test-dir C:\neasant-ci-build -C Release --output-on-failure 2>&1" |
             Tee-Object -FilePath $results
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
