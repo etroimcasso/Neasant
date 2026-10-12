@@ -1,4 +1,4 @@
-#include "nescore/cpu/cpu6502.h"
+#include "neasant/cpu/cpu6502.h"
 #include "vector_harness.h"
 
 #include <gtest/gtest.h>
@@ -21,15 +21,15 @@
 
 namespace {
 
-using nescore::Cpu6502;
-using nescore::Cpu6502State;
-using nescore::CpuSequence;
-using nescore::CycleKind;
-using nescore::kCpuFlagI;
-using nescore::kCpuFlagZ;
-using nescore::cpu_vectors::Access;
-using nescore::cpu_vectors::RecordingBus;
-using enum nescore::CycleKind;
+using neasant::Cpu6502;
+using neasant::Cpu6502State;
+using neasant::CpuSequence;
+using neasant::CycleKind;
+using neasant::kCpuFlagI;
+using neasant::kCpuFlagZ;
+using neasant::cpu_vectors::Access;
+using neasant::cpu_vectors::RecordingBus;
+using enum neasant::CycleKind;
 
 void expectAccess(const Access& access, std::uint16_t address, CycleKind kind) {
   EXPECT_EQ(access.address, address);

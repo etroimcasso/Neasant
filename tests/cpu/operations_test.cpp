@@ -1,4 +1,4 @@
-#include "nescore/cpu/cpu6502.h"
+#include "neasant/cpu/cpu6502.h"
 #include "vector_harness.h"
 
 #include <gtest/gtest.h>
@@ -17,14 +17,14 @@
 
 namespace {
 
-using nescore::Cpu6502;
-using nescore::Cpu6502State;
-using nescore::kCpuFlagC;
-using nescore::kCpuFlagD;
-using nescore::kCpuFlagN;
-using nescore::kCpuFlagV;
-using nescore::kCpuFlagZ;
-using nescore::cpu_vectors::RecordingBus;
+using neasant::Cpu6502;
+using neasant::Cpu6502State;
+using neasant::kCpuFlagC;
+using neasant::kCpuFlagD;
+using neasant::kCpuFlagN;
+using neasant::kCpuFlagV;
+using neasant::kCpuFlagZ;
+using neasant::cpu_vectors::RecordingBus;
 
 constexpr std::uint16_t kCell = 0x0010;
 

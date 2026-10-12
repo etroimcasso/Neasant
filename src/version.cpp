@@ -1,7 +1,7 @@
-#include "nescore/version.h"
+#include "neasant/version.h"
 
-namespace nescore {
+namespace neasant {
 
 const char* version() { return "0.0.0"; }
 
-}  // namespace nescore
+}  // namespace neasant

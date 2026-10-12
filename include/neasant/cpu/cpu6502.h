@@ -31,7 +31,7 @@
 #include <cstdint>
 #include <string_view>
 
-namespace nescore {
+namespace neasant {
 
 // What a bus access is for. A bus prices a cycle by the region it reaches and the
 // purpose it serves, an observer names it, and a watch tells an instruction fetch
@@ -1212,4 +1212,4 @@ bool Cpu6502::executeJamCycle(B& bus) {
   }
 }
 
-}  // namespace nescore
+}  // namespace neasant

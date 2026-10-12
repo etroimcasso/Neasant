@@ -1,4 +1,4 @@
-# nescore documentation
+# Neasant documentation
 
 These pages describe what is built and how to use it. Every value in them is derived from public
 hardware documentation and validated against it. Where the published documentation is incomplete,

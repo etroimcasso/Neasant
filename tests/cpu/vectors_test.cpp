@@ -1,4 +1,4 @@
-#include "nescore/cpu/cpu6502.h"
+#include "neasant/cpu/cpu6502.h"
 #include "vector_harness.h"
 
 #include <gtest/gtest.h>
@@ -14,38 +14,38 @@
 #include <unordered_set>
 #include <vector>
 
-#ifndef NESCORE_NES6502_VECTORS
-#define NESCORE_NES6502_VECTORS ""
+#ifndef NEASANT_NES6502_VECTORS
+#define NEASANT_NES6502_VECTORS ""
 #endif
 
 // The core against the SingleStepTests nes6502 vector set: every case of every opcode
-// file, compared cycle by cycle and on the final state. The NESCORE_NES6502_VECTORS
+// file, compared cycle by cycle and on the final state. The NEASANT_NES6502_VECTORS
 // build option names the directory. Two environment variables shape a run:
-// NESCORE_REQUIRE_NES6502_VECTORS=1 turns a missing vector path into a failure, and
-// NESCORE_NES6502_CASE_CAP=N runs at most N cases per file.
+// NEASANT_REQUIRE_NES6502_VECTORS=1 turns a missing vector path into a failure, and
+// NEASANT_NES6502_CASE_CAP=N runs at most N cases per file.
 
 namespace {
 
-using nescore::Cpu6502;
-using nescore::Cpu6502State;
-using nescore::cpu_vectors::Access;
-using nescore::cpu_vectors::CycleTrace;
-using nescore::cpu_vectors::isWrite;
-using nescore::cpu_vectors::parseVectorFile;
-using nescore::cpu_vectors::readFile;
-using nescore::cpu_vectors::RecordingBus;
-using nescore::cpu_vectors::VectorCase;
+using neasant::Cpu6502;
+using neasant::Cpu6502State;
+using neasant::cpu_vectors::Access;
+using neasant::cpu_vectors::CycleTrace;
+using neasant::cpu_vectors::isWrite;
+using neasant::cpu_vectors::parseVectorFile;
+using neasant::cpu_vectors::readFile;
+using neasant::cpu_vectors::RecordingBus;
+using neasant::cpu_vectors::VectorCase;
 
-std::string vectorsDir() { return NESCORE_NES6502_VECTORS; }
+std::string vectorsDir() { return NEASANT_NES6502_VECTORS; }
 
 bool vectorsRequired() {
-  const char* raw = std::getenv("NESCORE_REQUIRE_NES6502_VECTORS");
+  const char* raw = std::getenv("NEASANT_REQUIRE_NES6502_VECTORS");
   return raw != nullptr && std::string(raw) == "1";
 }
 
 // Zero (unset) runs every case; a positive value runs at most that many per file.
 std::size_t caseCap() {
-  const char* raw = std::getenv("NESCORE_NES6502_CASE_CAP");
+  const char* raw = std::getenv("NEASANT_NES6502_CASE_CAP");
   if (raw == nullptr) return 0;
   const long v = std::strtol(raw, nullptr, 10);
   return v > 0 ? static_cast<std::size_t>(v) : 0;
@@ -152,11 +152,11 @@ TEST_P(Cpu6502Vectors, MatchesTraceAndFinalState) {
   const int opcode = GetParam();
   if (vectorsDir().empty()) {
     if (vectorsRequired()) {
-      FAIL() << "NESCORE_NES6502_VECTORS is empty and NESCORE_REQUIRE_NES6502_VECTORS=1 "
-                "requires the vector set; configure with -DNESCORE_NES6502_VECTORS "
+      FAIL() << "NEASANT_NES6502_VECTORS is empty and NEASANT_REQUIRE_NES6502_VECTORS=1 "
+                "requires the vector set; configure with -DNEASANT_NES6502_VECTORS "
                 "pointing at the SingleStepTests 65x02 nes6502/v1 directory.";
     }
-    GTEST_SKIP() << "NESCORE_NES6502_VECTORS is unset; point it at the SingleStepTests "
+    GTEST_SKIP() << "NEASANT_NES6502_VECTORS is unset; point it at the SingleStepTests "
                     "65x02 nes6502/v1 directory to run the vectors.";
   }
 

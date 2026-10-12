@@ -5,7 +5,7 @@
 #include <iterator>
 #include <stdexcept>
 
-namespace nescore::cpu_vectors {
+namespace neasant::cpu_vectors {
 namespace {
 
 // A recursive-descent reader over the vector format: a top-level array of objects,
@@ -239,4 +239,4 @@ std::optional<std::string> readFile(const std::string& path) {
   return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
-}  // namespace nescore::cpu_vectors
+}  // namespace neasant::cpu_vectors

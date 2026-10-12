@@ -1,9 +1,9 @@
-#include "nescore/cpu/cpu6502.h"
+#include "neasant/cpu/cpu6502.h"
 
 #include <array>
 #include <cstddef>
 
-namespace nescore {
+namespace neasant {
 
 namespace {
 
@@ -533,4 +533,4 @@ bool Cpu6502::branchTaken(Mnemonic mnemonic) const noexcept {
   }
 }
 
-}  // namespace nescore
+}  // namespace neasant

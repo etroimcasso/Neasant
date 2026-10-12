@@ -1,4 +1,4 @@
-#include "nescore/cpu/cpu6502.h"
+#include "neasant/cpu/cpu6502.h"
 #include "vector_harness.h"
 
 #include <gtest/gtest.h>
@@ -19,17 +19,17 @@
 
 namespace {
 
-using nescore::Cpu6502;
-using nescore::Cpu6502State;
-using nescore::CycleKind;
-using nescore::kCpuFlagC;
-using nescore::kCpuFlagD;
-using nescore::kCpuFlagN;
-using nescore::kCpuFlagV;
-using nescore::kCpuFlagZ;
-using nescore::cpu_vectors::Access;
-using nescore::cpu_vectors::RecordingBus;
-using enum nescore::CycleKind;
+using neasant::Cpu6502;
+using neasant::Cpu6502State;
+using neasant::CycleKind;
+using neasant::kCpuFlagC;
+using neasant::kCpuFlagD;
+using neasant::kCpuFlagN;
+using neasant::kCpuFlagV;
+using neasant::kCpuFlagZ;
+using neasant::cpu_vectors::Access;
+using neasant::cpu_vectors::RecordingBus;
+using enum neasant::CycleKind;
 
 constexpr std::uint16_t kCell = 0x0010;
 
@@ -605,7 +605,7 @@ TEST(CpuUnofficial, JamHaltsTheCoreUntilReset) {
   EXPECT_EQ(cpu.state().x, 0x22);
   EXPECT_EQ(cpu.state().y, 0x33);
   EXPECT_EQ(cpu.state().s, 0xFA);
-  EXPECT_NE(cpu.state().p & nescore::kCpuFlagI, 0);
+  EXPECT_NE(cpu.state().p & neasant::kCpuFlagI, 0);
 }
 
 TEST(CpuUnofficial, EveryJamOpcodeJams) {
@@ -636,7 +636,7 @@ TEST(CpuUnofficial, AnInterruptDoesNotReleaseAJammedCore) {
   for (int i = 0; i < 3; ++i) cpu.stepCycle(bus);
   expectTrace(bus.trace, {{0xFFFF, DummyRead}, {0xFFFF, DummyRead}, {0xFFFF, DummyRead}});
   EXPECT_TRUE(cpu.state().jammed);
-  EXPECT_EQ(cpu.state().servicing, nescore::CpuSequence::None);
+  EXPECT_EQ(cpu.state().servicing, neasant::CpuSequence::None);
   EXPECT_EQ(cpu.state().pc, 0x0202);
 }
 

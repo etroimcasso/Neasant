@@ -1,4 +1,4 @@
-#include "nescore/cpu/cpu6502.h"
+#include "neasant/cpu/cpu6502.h"
 #include "vector_harness.h"
 
 #include <gtest/gtest.h>
@@ -18,14 +18,14 @@
 
 namespace {
 
-using nescore::Cpu6502;
-using nescore::Cpu6502State;
-using nescore::CycleKind;
-using nescore::kCpuFlagN;
-using nescore::kCpuFlagZ;
-using nescore::cpu_vectors::Access;
-using nescore::cpu_vectors::RecordingBus;
-using enum nescore::CycleKind;
+using neasant::Cpu6502;
+using neasant::Cpu6502State;
+using neasant::CycleKind;
+using neasant::kCpuFlagN;
+using neasant::kCpuFlagZ;
+using neasant::cpu_vectors::Access;
+using neasant::cpu_vectors::RecordingBus;
+using enum neasant::CycleKind;
 
 RecordingBus busWith(std::initializer_list<std::pair<std::uint16_t, std::uint8_t>> ram) {
   RecordingBus bus;

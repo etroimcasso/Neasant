@@ -1,4 +1,4 @@
-#include "nescore/cpu/cpu6502.h"
+#include "neasant/cpu/cpu6502.h"
 
 #include <gtest/gtest.h>
 
@@ -15,19 +15,19 @@
 
 namespace {
 
-using nescore::Cpu6502;
-using nescore::Cpu6502State;
-using nescore::CpuBus;
-using nescore::CpuSequence;
-using nescore::CycleKind;
-using nescore::kCpuFlagC;
-using nescore::kCpuFlagD;
-using nescore::kCpuFlagI;
-using nescore::kCpuFlagN;
-using nescore::kCpuFlagU;
-using nescore::kCpuFlagV;
-using nescore::kCpuFlagZ;
-using nescore::powerOn;
+using neasant::Cpu6502;
+using neasant::Cpu6502State;
+using neasant::CpuBus;
+using neasant::CpuSequence;
+using neasant::CycleKind;
+using neasant::kCpuFlagC;
+using neasant::kCpuFlagD;
+using neasant::kCpuFlagI;
+using neasant::kCpuFlagN;
+using neasant::kCpuFlagU;
+using neasant::kCpuFlagV;
+using neasant::kCpuFlagZ;
+using neasant::powerOn;
 
 // A flat 64 KiB memory that records every access the core makes.
 struct Access {

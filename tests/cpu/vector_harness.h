@@ -6,7 +6,7 @@
 // describes (objects, arrays, non-negative integers and strings), so the suite
 // takes no JSON library.
 
-#include "nescore/cpu/cpu6502.h"
+#include "neasant/cpu/cpu6502.h"
 
 #include <array>
 #include <cstdint>
@@ -15,7 +15,7 @@
 #include <utility>
 #include <vector>
 
-namespace nescore::cpu_vectors {
+namespace neasant::cpu_vectors {
 
 // One bus access as the core made it.
 struct Access {
@@ -78,4 +78,4 @@ struct VectorCase {
 // Reads a whole file; nullopt if it cannot be opened.
 [[nodiscard]] std::optional<std::string> readFile(const std::string& path);
 
-}  // namespace nescore::cpu_vectors
+}  // namespace neasant::cpu_vectors
