@@ -38,6 +38,16 @@ if(NEASANT_IS_TOP_LEVEL)
   endif()
 endif()
 
+# ── Warning flags ───────────────────────────────────────────────────────────
+# One list for the library and for every test executable, so a header compiles
+# without a warning wherever its templates are instantiated.
+if(MSVC)
+  set(NEASANT_WARNING_FLAGS /W4 /permissive- /Zc:__cplusplus)
+else()
+  set(NEASANT_WARNING_FLAGS
+    -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion)
+endif()
+
 # ── The library ─────────────────────────────────────────────────────────────
 add_library(neasant STATIC
   src/version.cpp
@@ -49,16 +59,12 @@ target_include_directories(neasant PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
 )
 target_compile_features(neasant PUBLIC cxx_std_20)
+target_compile_options(neasant PRIVATE ${NEASANT_WARNING_FLAGS})
 
-if(MSVC)
-  target_compile_options(neasant PRIVATE /W4 /permissive- /Zc:__cplusplus)
-else()
-  target_compile_options(neasant PRIVATE
-    -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion
-    # Each function and datum in its own section so a consumer's final link
-    # can drop what it never references.
-    -ffunction-sections -fdata-sections
-  )
+if(NOT MSVC)
+  # Each function and datum in its own section so a consumer's final link
+  # can drop what it never references.
+  target_compile_options(neasant PRIVATE -ffunction-sections -fdata-sections)
 endif()
 
 # ── Tests ───────────────────────────────────────────────────────────────────

@@ -611,8 +611,8 @@ TEST(CpuUnofficial, JamHaltsTheCoreUntilReset) {
 TEST(CpuUnofficial, EveryJamOpcodeJams) {
   // No More Secrets, "JAM (KIL, HLT, CIM, CRP)" (the twelve opcodes); 64doc's
   // matrix legend (t).
-  for (const std::uint8_t opcode :
-       {0x02, 0x12, 0x22, 0x32, 0x42, 0x52, 0x62, 0x72, 0x92, 0xB2, 0xD2, 0xF2}) {
+  for (const std::uint8_t opcode : std::initializer_list<std::uint8_t>{
+           0x02, 0x12, 0x22, 0x32, 0x42, 0x52, 0x62, 0x72, 0x92, 0xB2, 0xD2, 0xF2}) {
     SCOPED_TRACE(::testing::Message() << "opcode " << int{opcode});
     auto bus = busWith({{0x0200, opcode}});
     Cpu6502 cpu(Cpu6502State{.pc = 0x0200, .s = 0xFD});

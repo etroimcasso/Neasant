@@ -706,7 +706,9 @@ TEST(CpuLines, OamDmaHaltingOnAPutCycleTakes513Cycles) {
   // NESdev wiki, "DMA", Summary, Behavior and OAM DMA.
   auto bus = busFor<DmaBus>(
       {{0x0200, 0x8D}, {0x0201, 0x14}, {0x0202, 0x40}, {0x0203, kNop}, {0x0204, kNop}});
-  for (int i = 0; i < 256; ++i) bus.mem[0x0300 + i] = static_cast<std::uint8_t>(i ^ 0x5A);
+  for (int i = 0; i < 256; ++i) {
+    bus.mem[static_cast<std::size_t>(0x0300 + i)] = static_cast<std::uint8_t>(i ^ 0x5A);
+  }
   bus.put = true;
   Cpu6502 cpu(Cpu6502State{.pc = 0x0200, .s = 0xFD, .a = 0x03});
   for (int i = 0; i < 4; ++i) stepMachine(cpu, bus);
@@ -731,7 +733,9 @@ TEST(CpuLines, OamDmaHaltingOnAGetCycleTakes514Cycles) {
   // NESdev wiki, "DMA", Summary, Behavior and OAM DMA.
   auto bus = busFor<DmaBus>(
       {{0x0200, 0x8D}, {0x0201, 0x14}, {0x0202, 0x40}, {0x0203, kNop}, {0x0204, kNop}});
-  for (int i = 0; i < 256; ++i) bus.mem[0x0300 + i] = static_cast<std::uint8_t>(i ^ 0x5A);
+  for (int i = 0; i < 256; ++i) {
+    bus.mem[static_cast<std::size_t>(0x0300 + i)] = static_cast<std::uint8_t>(i ^ 0x5A);
+  }
   bus.put = false;
   Cpu6502 cpu(Cpu6502State{.pc = 0x0200, .s = 0xFD, .a = 0x03});
   for (int i = 0; i < 4; ++i) stepMachine(cpu, bus);
@@ -761,8 +765,8 @@ TEST(CpuLines, OamDmaWaitsForAWriteCycleAndCopiesTheSecondPageWritten) {
                              {0x0204, kNop},
                              {0x4014, 0x03}});
   for (int i = 0; i < 256; ++i) {
-    bus.mem[0x0300 + i] = static_cast<std::uint8_t>(i ^ 0x5A);
-    bus.mem[0x0400 + i] = static_cast<std::uint8_t>(i ^ 0xA5);
+    bus.mem[static_cast<std::size_t>(0x0300 + i)] = static_cast<std::uint8_t>(i ^ 0x5A);
+    bus.mem[static_cast<std::size_t>(0x0400 + i)] = static_cast<std::uint8_t>(i ^ 0xA5);
   }
   bus.put = true;
   Cpu6502 cpu(Cpu6502State{.pc = 0x0200, .s = 0xFD});
