@@ -57,7 +57,9 @@ void expectTrace(const std::vector<Access>& trace, std::initializer_list<Step> s
   for (const Step& step : steps) {
     SCOPED_TRACE(::testing::Message() << "cycle " << cycle + 1);
     expectAccess(trace[cycle], step.address, step.kind);
-    if (step.value >= 0) EXPECT_EQ(trace[cycle].value, step.value);
+    if (step.value >= 0) {
+      EXPECT_EQ(trace[cycle].value, step.value);
+    }
     ++cycle;
   }
 }

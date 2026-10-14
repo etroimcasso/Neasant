@@ -49,7 +49,9 @@ void expectTrace(const std::vector<Access>& trace, const std::vector<Step>& step
   for (const Step& step : steps) {
     SCOPED_TRACE(::testing::Message() << "cycle " << cycle + 1);
     expectAccess(trace[cycle], step.address, step.kind);
-    if (step.value >= 0) EXPECT_EQ(trace[cycle].value, step.value);
+    if (step.value >= 0) {
+      EXPECT_EQ(trace[cycle].value, step.value);
+    }
     ++cycle;
   }
 }
@@ -101,7 +103,9 @@ std::size_t haltedCount(const std::vector<Access>& trace) {
 
 void expectHaltedAt(const std::vector<Access>& trace, std::uint16_t address) {
   for (const Access& a : trace) {
-    if (a.kind == Halted) EXPECT_EQ(a.address, address);
+    if (a.kind == Halted) {
+      EXPECT_EQ(a.address, address);
+    }
   }
 }
 
