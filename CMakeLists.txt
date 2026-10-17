@@ -52,6 +52,9 @@ endif()
 add_library(neasant STATIC
   src/version.cpp
   src/cpu/cpu6502.cpp
+  src/nes/cartridge.cpp
+  src/nes/board.cpp
+  src/mappers/nrom.cpp
 )
 add_library(neasant::neasant ALIAS neasant)
 

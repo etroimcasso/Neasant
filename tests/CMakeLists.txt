@@ -61,3 +61,7 @@ neasant_add_test(cpu_lines_test cpu/lines_test.cpp cpu/vector_harness.cpp)
 # stores whose value passes through the high byte of their address, and the halt a JAM
 # opcode brings. The recording bus is the vector harness's.
 neasant_add_test(cpu_unofficial_test cpu/unofficial_test.cpp cpu/vector_harness.cpp)
+
+# The cartridge as a value: the two header formats byte by byte, the image sliced and
+# the overrides applied, the refusals, and NROM answering on the CPU and PPU pins.
+neasant_add_test(nes_cartridge_test nes/cartridge_test.cpp)
