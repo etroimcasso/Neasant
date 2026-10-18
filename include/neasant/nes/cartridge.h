@@ -90,11 +90,11 @@ struct CartridgeHeader {
 // What a host states over the header: the mapper, the mirroring, the two RAM sizes (0
 // for none) and the battery flag. A field left empty takes the header's value.
 struct CartridgeOverrides {
-  std::optional<std::uint16_t> mapper;
-  std::optional<Mirroring> mirroring;
-  std::optional<std::size_t> prgRamBytes;
-  std::optional<std::size_t> chrRamBytes;
-  std::optional<bool> battery;
+  std::optional<std::uint16_t> mapper{};
+  std::optional<Mirroring> mirroring{};
+  std::optional<std::size_t> prgRamBytes{};
+  std::optional<std::size_t> chrRamBytes{};
+  std::optional<bool> battery{};
 };
 
 // A cartridge: its header, its two ROM areas copied out of the image, and the values the

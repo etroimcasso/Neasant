@@ -22,6 +22,11 @@ function(neasant_add_test target)
   add_executable(${target} ${ARGN})
   target_link_libraries(${target} PRIVATE neasant::neasant GTest::gtest_main)
   target_compile_options(${target} PRIVATE ${NEASANT_WARNING_FLAGS})
+  if(MSVC)
+    # The tests read their environment through std::getenv, which MSVC's runtime marks
+    # as unsafe in favour of its own _dupenv_s.
+    target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
+  endif()
   gtest_discover_tests(${target} DISCOVERY_MODE PRE_TEST)
 endfunction()
 
