@@ -70,3 +70,9 @@ neasant_add_test(cpu_unofficial_test cpu/unofficial_test.cpp cpu/vector_harness.
 # The cartridge as a value: the two header formats byte by byte, the image sliced and
 # the overrides applied, the refusals, and NROM answering on the CPU and PPU pins.
 neasant_add_test(nes_cartridge_test nes/cartridge_test.cpp)
+
+# The machine around the core: construction from a config value and its refusals, one
+# CPU cycle a step with the reset sequence over the first seven, the master-cycle budget
+# and its overshoot, the bus decode over work RAM, the cartridge, open bus, the PPU's
+# latch and the APU's bytes, the reset line, snapshot and restore, and the clock values.
+neasant_add_test(nes_machine_test nes/machine_test.cpp)
