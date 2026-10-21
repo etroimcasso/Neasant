@@ -443,15 +443,19 @@ TEST(NesBus, AnIndirectIndexedReadOfOpenBusAnswersThePointersHighByte) {
 }
 
 TEST(NesBus, ThePpuPortsLoadAndAnswerOneLatch) {
-  // NESdev wiki, "Open bus behavior", PPU open bus; "CPU memory map", the table.
+  // NESdev wiki, "Open bus behavior", PPU open bus; "CPU memory map", the table; "PPU
+  // registers", PPUSTATUS and The PPUDATA read buffer; "PPU power up state". The mirror
+  // $3F02 is $2002, answering the vertical-blank flag, set at power-on by default, over
+  // the latch's low five bits; $2007 answers the read buffer, held at zero through the
+  // warm-up, and loads it into the latch.
   // LDA #$AA; STA $2005; LDA $2001; LDX $4018; LDY $3F02; LDA #$BB; STA $2002; LDA $2007
   Nes m = machineWith({0xA9, 0xAA, 0x8D, 0x05, 0x20, 0xAD, 0x01, 0x20, 0xAE, 0x18, 0x40, 0xAC,
                        0x02, 0x3F, 0xA9, 0xBB, 0x8D, 0x02, 0x20, 0xAD, 0x07, 0x20});
   stepCycles(m, 35);
   EXPECT_EQ(m.state().cpu.x, 0x40);  // the CPU's open bus, another latch
-  EXPECT_EQ(m.state().cpu.y, 0xAA);  // the mirror $3F02 answers the latch
-  EXPECT_EQ(m.state().cpu.a, 0xBB);  // a write to $2002 loads it and $2007 answers it
-  EXPECT_EQ(m.state().ppu.ioLatch, 0xBB);
+  EXPECT_EQ(m.state().cpu.y, 0x8A);  // $80 | ($AA & $1F)
+  EXPECT_EQ(m.state().cpu.a, 0x00);  // the write to $2002 loaded $BB; $2007 answers 0
+  EXPECT_EQ(m.state().ppu.ioLatch, 0x00);
 }
 
 TEST(NesBus, TheApuStatusReadLeavesTheBusAlone) {
@@ -487,15 +491,18 @@ TEST(NesBus, TheApuRegistersHoldTheirBytes) {
 
 TEST(NesBus, TheControllerPortsAnswerOpenBusAboveFiveZeroLines) {
   // NESdev wiki, "Controller reading", $4016 / $4017 Read and Unconnected data lines and
-  // open bus; "Open bus behavior", CPU open bus. Each indexed read's page-crossing cycle
-  // reads a PPU port, $FF, before the port register.
+  // open bus; "Open bus behavior", CPU open bus; "PPU registers", The PPUDATA read
+  // buffer. Each indexed read's page-crossing cycle reads a PPU port before the port
+  // register: the first reads $3F16, a write-only port answering the latch, $FF; the
+  // second reads $3F17, which is $2007, answering the read buffer, zero through the
+  // warm-up.
   // LDA #$FF; STA $2000; LDX #$FF; LDA $3F17,X; STA $10; LDA $3F18,X
   Nes m = machineWith({0xA9, 0xFF, 0x8D, 0x00, 0x20, 0xA2, 0xFF, 0xBD, 0x17, 0x3F, 0x85, 0x10,
                        0xBD, 0x18, 0x3F});
   stepCycles(m, 28);
   EXPECT_EQ(m.state().ram[0x10], 0xE0);  // $4016
-  EXPECT_EQ(m.state().cpu.a, 0xE0);      // $4017
-  EXPECT_EQ(m.state().mdr, 0xE0);
+  EXPECT_EQ(m.state().cpu.a, 0x00);      // $4017
+  EXPECT_EQ(m.state().mdr, 0x00);
 }
 
 // ---- NesReset ----

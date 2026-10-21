@@ -13,6 +13,14 @@ namespace {
 constexpr std::uint64_t kMasterCyclesPerCpuCycle = 12;
 constexpr std::uint64_t kMasterCyclesPerDot = 4;
 
+// Where the CPU's access falls among the cycle's dots. M2 is low for the first 9/24 of
+// the cycle and high for the rest, four and a half master cycles in (NESdev wiki, "CPU
+// pinout", M2: a duty cycle of 15/24, and CPU cycles begin where M2 goes low), and the
+// console decodes the PPU's ports while M2 is high (NESdev wiki, "Open bus behavior",
+// Electrical basis), so a dot at master offset 4 falls before the access and one at
+// offset 5 after it: the dots under five master cycles into the cycle tick first.
+constexpr std::uint64_t kMasterCyclesToM2Rise = 5;
+
 // Fills a RAM from the seed, repeated from its start; an empty seed fills with $00.
 void fillFromSeed(std::span<std::uint8_t> ram, std::span<const std::uint8_t> seed) {
   for (std::size_t i = 0; i < ram.size(); ++i) {
@@ -23,7 +31,10 @@ void fillFromSeed(std::span<std::uint8_t> ram, std::span<const std::uint8_t> see
 }  // namespace
 
 Nes::Nes(NesConfig config)
-    : cpu_(powerOn()), region_(config.region), alignment_(config.alignment) {
+    : cpu_(powerOn()),
+      region_(config.region),
+      alignment_(config.alignment),
+      ppuOpenBusDecay_(config.ppuOpenBusDecay) {
   if (config.region != Region::Ntsc) {
     throw std::invalid_argument("PAL and Dendy are not yet selectable; NTSC is");
   }
@@ -49,6 +60,15 @@ Nes::Nes(NesConfig config)
   fillFromSeed(state_.prgRam, config.ramSeed);
   fillFromSeed(state_.chrRam, config.ramSeed);
   fillFromSeed(state_.ppu.ciram, config.ramSeed);
+  fillFromSeed(state_.ppu.oam, config.ramSeed);
+  // NESdev wiki, "PPU power up state": the palette is unspecified at power-on; "PPU
+  // registers", Reading palette RAM: an entry is six bits.
+  fillFromSeed(state_.ppu.palette, config.ramSeed);
+  for (std::uint8_t& entry : state_.ppu.palette) {
+    entry = static_cast<std::uint8_t>(entry & 0x3Fu);
+  }
+  // NESdev wiki, "PPU power up state", the note on the VBL flag: random at power-on.
+  state_.ppu.vblank = config.vblankAtPowerOn;
   state_.apuPhase = config.apuPhase;
   // NESdev wiki, "PPU frame timing", CPU-PPU Clock Alignment: the first CPU cycle begins 0
   // to 3 master cycles before the PPU's nearest following dot.
@@ -84,6 +104,9 @@ void Nes::reset() {
   // low bit. Every other register keeps its byte.
   state_.apuRegs[0x15] = 0;
   state_.apuRegs[0x11] = static_cast<std::uint8_t>(state_.apuRegs[0x11] & 0x01u);
+  // NESdev wiki, "PPU power up state": a front-loading console's reset line resets the
+  // PPU with the CPU.
+  ppuReset(state_.ppu);
   state_.cpu = cpu_.state();
 }
 
@@ -109,6 +132,11 @@ const std::optional<Joypad>& Nes::joypad(JoypadPort port) const noexcept {
   return state_.pads[static_cast<std::size_t>(port)];
 }
 
+PpuInputs Nes::ppuInputs() noexcept {
+  return PpuInputs{state_.board, cartridge_, state_.chrRam,
+                   static_cast<std::uint32_t>(ppuOpenBusDecay_ / kMasterCyclesPerDot)};
+}
+
 Nes::Target Nes::decode(std::uint16_t address) noexcept {
   // NESdev wiki, "CPU memory map", the table; "2A03", 2A03 register map.
   if (address < 0x2000) return Target::WorkRam;
@@ -131,8 +159,10 @@ std::uint8_t Nes::busRead(std::uint16_t address, CycleKind) {
       break;
     case Target::Ppu: {
       // NESdev wiki, "CPU memory map": the eight ports repeat every eight bytes.
-      PpuInputs inputs{state_.board, cartridge_, state_.chrRam};
-      value = ppuRead(state_.ppu, static_cast<std::uint8_t>(address & 0x0007u), inputs);
+      const auto port = static_cast<std::uint8_t>(address & 0x0007u);
+      const PpuInputs inputs = ppuInputs();
+      value = ppuRead(state_.ppu, port, inputs);
+      statusRead_ = port == 2;
       break;
     }
     case Target::ApuStatus:
@@ -174,7 +204,7 @@ void Nes::busWrite(std::uint16_t address, std::uint8_t value, CycleKind) {
       state_.ram[address & 0x07FFu] = value;
       break;
     case Target::Ppu: {
-      PpuInputs inputs{state_.board, cartridge_, state_.chrRam};
+      const PpuInputs inputs = ppuInputs();
       ppuWrite(state_.ppu, static_cast<std::uint8_t>(address & 0x0007u), value, inputs);
       break;
     }
@@ -209,14 +239,25 @@ void Nes::busWrite(std::uint16_t address, std::uint8_t value, CycleKind) {
 }
 
 void Nes::machineCycle() {
-  // The dots whose master cycle falls inside this CPU cycle, then the CPU's one access.
+  // The dots whose master cycle falls before M2 rises, then the CPU's one access, then
+  // the dots that fall after it, which a read of $2002 under way is told (NESdev wiki,
+  // "PPU frame timing", VBL Flag Timing), then the NMI output as the CPU samples it at
+  // the cycle's end (NESdev wiki, "CPU interrupts", Detailed interrupt behavior: the
+  // edge detector polls the line during the second half of each cycle).
+  const std::uint64_t access = state_.master + kMasterCyclesToM2Rise;
   const std::uint64_t end = state_.master + kMasterCyclesPerCpuCycle;
-  while (state_.dotClock < end) {
-    ppuTickDot(state_.ppu);
+  while (state_.dotClock < access) {
+    ppuTickDot(state_.ppu, false);
     state_.dotClock += kMasterCyclesPerDot;
   }
   Bus bus{*this};
+  statusRead_ = false;
   cpu_.stepCycle(bus);
+  while (state_.dotClock < end) {
+    ppuTickDot(state_.ppu, statusRead_);
+    state_.dotClock += kMasterCyclesPerDot;
+  }
+  cpu_.setNmiLine(ppuNmiAsserted(state_.ppu));
   state_.master = end;
   state_.apuPhase = static_cast<std::uint8_t>(state_.apuPhase ^ 1u);
   state_.cpu = cpu_.state();

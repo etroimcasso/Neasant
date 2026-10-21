@@ -76,3 +76,12 @@ neasant_add_test(nes_cartridge_test nes/cartridge_test.cpp)
 # and its overshoot, the bus decode over work RAM, the cartridge, open bus, the PPU's
 # latch and the APU's bytes, the reset line, snapshot and restore, and the clock values.
 neasant_add_test(nes_machine_test nes/machine_test.cpp)
+
+# The PPU without its picture: the eight ports with their latches, values and side
+# effects, the scroll file, the port at $2007 over the chip's address space and the
+# console's nametable RAM, the palette and OAM, the read buffer, the warm-up window,
+# the frame counter with its flag and its odd-frame skip, the NMI output and the cycle
+# the CPU takes the interrupt on, a read of $2002 against the flag's dot under each
+# alignment, power-on and reset. The authored-image helpers are the machine tests'.
+neasant_add_test(ppu_registers_test ppu/registers_test.cpp)
+target_include_directories(ppu_registers_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)

@@ -1,17 +1,19 @@
 #pragma once
 
 // The NES as a machine around the 6502: the master clock and its budget, the bus as the
-// console decodes it, the 2 KB of work RAM, the open bus, the PPU's ports, the APU's
-// registers as the bytes written to them, the controller ports, the OAM DMA page, and
-// the cartridge on its board behind the pins.
+// console decodes it, the 2 KB of work RAM, the open bus, the PPU with its ports, its
+// memories, its frame and its NMI output, the APU's registers as the bytes written to
+// them, the controller ports, the OAM DMA page, and the cartridge on its board behind
+// the pins.
 //
 // A machine is built from one config value and is at power-on from then: the CPU's
 // reset sequence is pending, every RAM holds the seed, and the first seven cycles run
 // the sequence to the reset vector. step() runs one machine cycle; run() spends a
 // master-cycle budget in whole machine cycles and carries the overshoot, so run(a) then
 // run(b) lands where run(a + b) does. One machine cycle is one CPU cycle, twelve master
-// cycles, in which the PPU runs every dot whose master cycle falls inside it, one every
-// four.
+// cycles: the PPU runs every dot whose master cycle falls inside it, one every four,
+// the CPU's one access lands after the dots that fall before M2 rises, and the CPU
+// samples the PPU's NMI output as the cycle ends.
 //
 // The whole mutable machine is one state value: state() answers it by reference,
 // restore() replaces it, and a machine is copied whole. The image, the region and the
@@ -47,9 +49,20 @@ struct NesConfig {
   // which the hardware settles by chance at power-on (NESdev wiki, "DMA", Summary and
   // Cadence).
   std::uint8_t apuPhase = 0;
+  // Whether the PPU's vertical-blank flag is set at power-on, which the hardware
+  // settles by chance; the flag is usually found set (NESdev wiki, "PPU power up
+  // state", Initial Register Values and the note on the VBL flag).
+  bool vblankAtPowerOn = true;
+  // Master cycles a bit of the PPU's I/O bus keeps the value an access drove onto it
+  // before it decays to zero; 0 keeps it for ever. The hardware's time varies with the
+  // chip and its warmth (NESdev forum, "Tests for ACE speedruns that rely on PPU's
+  // internal open bus"); the default is the thread's reading for an NTSC NES at
+  // power-on, $A00 counts of 15 CPU cycles, 38 400 CPU cycles.
+  std::uint32_t ppuOpenBusDecay = 460800;
   // The pattern every RAM is filled with at power-on, repeated from its start; empty
   // fills with $00. The hardware leaves RAM unreliable at power-on (NESdev wiki, "CPU
-  // power up state", RAM contents).
+  // power up state", RAM contents) and the PPU's memories unspecified (NESdev wiki,
+  // "PPU power up state"). A palette entry keeps six bits of its byte.
   std::span<const std::uint8_t> ramSeed{};
   // Overrides on the header, each taken when set (CartridgeOverrides in cartridge.h).
   std::optional<std::uint16_t> mapper{};
@@ -132,10 +145,12 @@ class Nes {
  public:
   // Builds the machine at power-on: the CPU with its reset sequence pending, every RAM
   // holding the seed, the APU's registers zero (NESdev wiki, "CPU power up state",
-  // APU), the open bus zero, the PPU's latch zero and its counter at the first dot,
-  // the ports empty, and the master counter at zero. The first seven cycles run the
-  // reset sequence to the reset vector. Throws std::invalid_argument as NesConfig says.
-  // A machine is copied and moved whole: the state, the image and the board go with it.
+  // APU), the open bus zero, the PPU with its registers at their power-on values, its
+  // vertical-blank flag as the config says, its warm-up window open and its counter at
+  // the first dot (NESdev wiki, "PPU power up state"), the ports empty, and the master
+  // counter at zero. The first seven cycles run the reset sequence to the reset vector.
+  // Throws std::invalid_argument as NesConfig says. A machine is copied and moved
+  // whole: the state, the image and the board go with it.
   explicit Nes(NesConfig config);
 
   // The whole machine as a value. state() answers the machine's own state without
@@ -148,25 +163,31 @@ class Nes {
   [[nodiscard]] const NesState& state() const noexcept { return state_; }
   void restore(const NesState& state);
 
-  // The console's reset line, pulled and let go. The CPU's reset sequence is pending
-  // again and runs on the next cycles, keeping A, X, Y and every flag but I, and a
-  // jammed core is released (NESdev wiki, "CPU power up state", CPU). The APU's status
-  // register goes to 0 and the DMC's direct load keeps its low bit; every other APU
-  // register keeps its byte (NESdev wiki, "CPU power up state", APU; "APU", Status).
-  // Work RAM, PRG RAM, CHR RAM, the open bus, the strobe, the pads, the PPU and the
-  // master counters keep what they hold. Call it between step() and run() calls.
+  // The console's reset line, pulled and let go, which resets the CPU and the PPU
+  // together as a front-loading console's does (NESdev wiki, "PPU power up state"). The
+  // CPU's reset sequence is pending again and runs on the next cycles, keeping A, X, Y
+  // and every flag but I, and a jammed core is released (NESdev wiki, "CPU power up
+  // state", CPU). The APU's status register goes to 0 and the DMC's direct load keeps
+  // its low bit; every other APU register keeps its byte (NESdev wiki, "CPU power up
+  // state", APU; "APU", Status). The PPU is as ppuReset leaves it: its counter back at
+  // the top of the picture and its warm-up window open, its flag, its address and its
+  // memories kept. Work RAM, PRG RAM, CHR RAM, the open bus, the strobe, the pads and
+  // the master counters keep what they hold. Call it between step() and run() calls.
   void reset();
 
-  // The region the machine was built for and the CPU-PPU alignment it was built with,
-  // both fixed for its life like the image.
+  // The region the machine was built for, the CPU-PPU alignment it was built with and
+  // the I/O bus decay it was built with, in master cycles, all fixed for its life like
+  // the image.
   [[nodiscard]] Region region() const noexcept { return region_; }
   [[nodiscard]] std::uint8_t alignment() const noexcept { return alignment_; }
+  [[nodiscard]] std::uint32_t ppuOpenBusDecay() const noexcept { return ppuOpenBusDecay_; }
 
   // Runs one machine cycle, one CPU cycle, and returns its master cycles, twelve: the
-  // PPU runs the dots that fall inside the cycle and the CPU makes one bus access. A
-  // core the RDY line holds repeats its halted read, and a jammed one its idle read. A
-  // fresh machine's first seven cycles are the reset sequence. The overshoot run()
-  // carries is unchanged.
+  // PPU runs the dots that fall inside the cycle, the CPU makes one bus access among
+  // them, and the CPU samples the PPU's NMI output as the cycle ends. A core the RDY
+  // line holds repeats its halted read, and a jammed one its idle read. A fresh
+  // machine's first seven cycles are the reset sequence. The overshoot run() carries is
+  // unchanged.
   std::uint64_t step();
 
   // Runs whole machine cycles until the machine stands at least `budget` master cycles
@@ -213,15 +234,23 @@ class Nes {
   std::uint8_t busRead(std::uint16_t address, CycleKind kind);
   void busWrite(std::uint16_t address, std::uint8_t value, CycleKind kind);
 
-  // One machine cycle: the dots that fall inside it, the CPU's cycle on the bus, then
-  // the counters.
+  // One machine cycle: the dots that fall before M2 rises, the CPU's cycle on the bus,
+  // the dots that fall after, the NMI line, then the counters.
   void machineCycle();
+
+  // The chip's inputs as this machine supplies them: its board and cartridge, its CHR
+  // RAM, and the I/O bus decay in whole dots.
+  [[nodiscard]] PpuInputs ppuInputs() noexcept;
 
   NesState state_;
   Cpu6502 cpu_;
   Cartridge cartridge_;
   Region region_;
   std::uint8_t alignment_;
+  std::uint32_t ppuOpenBusDecay_;
+  // Whether the cycle under way is reading $2002, which the dots that tick after the
+  // read are told. Meaningful inside one machineCycle call and not part of the state.
+  bool statusRead_ = false;
 };
 
 }  // namespace neasant
