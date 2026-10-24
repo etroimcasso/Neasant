@@ -471,13 +471,14 @@ TEST(NesBus, TheApuStatusReadLeavesTheBusAlone) {
 
 TEST(NesBus, TheApuRegistersHoldTheirBytes) {
   // NESdev wiki, "2A03", 2A03 register map; "APU", Registers; "DMA", OAM DMA; "Controller
-  // reading", $4016 Write.
+  // reading", $4016 Write. The write to $4014 starts a transfer that holds the CPU for
+  // 513 cycles before the next instruction's opcode fetch.
   // LDA #$C0; STA $4017; LDA #$0F; STA $4015; LDA #$02; STA $4014; LDA #$01; STA $4016;
   // LDA #$7F; STA $4011; STA $4000
   Nes m = machineWith({0xA9, 0xC0, 0x8D, 0x17, 0x40, 0xA9, 0x0F, 0x8D, 0x15, 0x40, 0xA9, 0x02,
                        0x8D, 0x14, 0x40, 0xA9, 0x01, 0x8D, 0x16, 0x40, 0xA9, 0x7F, 0x8D, 0x11,
                        0x40, 0x8D, 0x00, 0x40});
-  stepCycles(m, 41);
+  stepCycles(m, 554);
   const NesState& s = m.state();
   EXPECT_EQ(s.apuRegs[0x17], 0xC0);
   EXPECT_EQ(s.apuRegs[0x15], 0x0F);

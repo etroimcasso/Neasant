@@ -85,3 +85,11 @@ neasant_add_test(nes_machine_test nes/machine_test.cpp)
 # alignment, power-on and reset. The authored-image helpers are the machine tests'.
 neasant_add_test(ppu_registers_test ppu/registers_test.cpp)
 target_include_directories(ppu_registers_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
+
+# The controller ports and OAM DMA: the strobe and the registers it fills, a pad read
+# bit by bit through its port's clock line, a run of reads as one clock, an empty
+# socket, the open-bus bits above the lines; the OAM DMA unit halting the CPU through
+# RDY for 513 or 514 cycles, its gets and puts through the one bus, the halted read on
+# its no-operation cycles, the halt waiting for a write cycle, a reset ending a
+# transfer, a snapshot carrying one, and an NMI arriving inside one.
+neasant_add_test(nes_input_dma_test nes/input_dma_test.cpp)
