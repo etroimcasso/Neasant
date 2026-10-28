@@ -95,16 +95,16 @@ TEST(NesBuild, RefusesARegionAlignmentOrPhaseItCannotBuild) {
   // Summary.
   const Bytes image = imageWith({kNop});
   EXPECT_EQ(buildRefusal({.rom = image, .region = Region::Pal}),
-            "PAL and Dendy are not yet selectable; NTSC is");
+            "PAL and Dendy are not built; NTSC is");
   EXPECT_EQ(buildRefusal({.rom = image, .region = Region::Dendy}),
-            "PAL and Dendy are not yet selectable; NTSC is");
+            "PAL and Dendy are not built; NTSC is");
   EXPECT_EQ(buildRefusal({.rom = image, .alignment = 4}),
             "an alignment of 4 is not one of 0 to 3");
   EXPECT_EQ(buildRefusal({.rom = image, .apuPhase = 2}),
             "an apuPhase of 2 is not 0 (a get) or 1 (a put)");
   // The config's own fields are checked before the image is read.
   EXPECT_EQ(buildRefusal({.rom = image, .region = Region::Pal, .mapper = 4}),
-            "PAL and Dendy are not yet selectable; NTSC is");
+            "PAL and Dendy are not built; NTSC is");
   EXPECT_EQ(buildRefusal({.alignment = 4}), "an alignment of 4 is not one of 0 to 3");
   const Nes m(NesConfig{.rom = image, .alignment = 3, .apuPhase = 1});
   EXPECT_EQ(m.alignment(), 3);

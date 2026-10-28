@@ -18,7 +18,10 @@
 //
 // The whole mutable machine is one state value: state() answers it by reference,
 // restore() replaces it, and a machine is copied whole. The image, the region and the
-// alignment are the machine's fixed identity and are not in the state.
+// alignment are the machine's fixed identity and are not in the state. A host that
+// wants to see the bus rather than the state sets a bus observer, told every access as
+// it settles; a host keeping a save sets a save observer, told when the cartridge's
+// battery-backed PRG RAM has changed. Both are the host's objects, outside the state.
 
 #include "neasant/cpu/cpu6502.h"
 #include "neasant/nes/board.h"
@@ -124,6 +127,68 @@ struct Joypad {
 // The two controller ports on the console's front.
 enum class JoypadPort : std::uint8_t { One, Two };
 
+// Who made a bus access. The CPU drives the bus on every cycle of its own, the cycles
+// it is halted on included; the OAM DMA unit makes its gets and puts while the CPU is
+// held off the bus (NESdev wiki, "DMA", Behavior). DmcDma names the DMC's sample
+// fetch; the DMC is not built, so no access carries it.
+enum class AccessSource : std::uint8_t { Cpu, OamDma, DmcDma };
+
+// One access as the machine made it: the address driven, the byte that crossed the bus
+// (what the bus answered for a read, what the source drove for a write), which way it
+// went, what the cycle was for as the CPU core drives it (CycleKind, cpu6502.h), and
+// who made it. The OAM DMA unit's accesses are plain data reads and writes; a read the
+// halted CPU repeats carries CycleKind::Halted.
+struct BusAccess {
+  std::uint16_t address = 0;
+  std::uint8_t value = 0;
+  bool write = false;
+  CycleKind kind = CycleKind::DataRead;
+  AccessSource source = AccessSource::Cpu;
+  [[nodiscard]] bool operator==(const BusAccess&) const noexcept = default;
+};
+
+// What a machine tells about every access it makes, one each machine cycle. The 6502
+// drives the bus on every cycle, so the accesses from one opcode fetch to the next are
+// that instruction's cycles, together with any an OAM DMA transfer puts among them: the
+// reads the halted CPU repeats, of kind CycleKind::Halted, and the unit's gets and puts,
+// of source AccessSource::OamDma. From the stream a host derives which addresses were
+// read and written, in what order, with what byte, and by whom.
+class BusObserver {
+ public:
+  virtual ~BusObserver() = default;
+
+  // An access that crossed the bus, after its value is settled: a register's read side
+  // effect has happened when the read is told. Inside the report state() holds the
+  // memories and the registers as the access left them and the CPU as the cycle began.
+  // The report is made inside the machine cycle, between the access and the dots that
+  // follow it, so it does not throw: a throw would leave the cycle half run.
+  virtual void access(const BusAccess& access) = 0;
+};
+
+// What a machine tells about the cartridge's battery-backed PRG RAM, the save: that it
+// has changed, and what it holds now. The machine says when and hands over the bytes;
+// where a save is kept, and whether it is written at all, is the host's.
+class SaveObserver {
+ public:
+  virtual ~SaveObserver() = default;
+
+  // The save differs from the bytes the machine last handed a save observer, or from the
+  // save as the machine was built when none has been handed yet, and `save` is the whole
+  // of it as it now stands, the size the cartridge declares. Told at the end of the
+  // machine cycle in which a frame ended, however many stores the frame made, and once
+  // by a restore() that leaves the save other than as last handed; not at all while the
+  // bytes are as last handed. The span is the machine's own storage and is valid for
+  // the call.
+  //
+  // A report arrives from inside step() or run(), after the cycle has closed and with
+  // state() coherent at its end, or from inside restore(), with the state in place. It
+  // may throw: the call returns through the throw with the machine so, and the report
+  // is not made again. A run() interrupted this way has accounted for its whole
+  // budget, so the next run() spends the remainder before its own and run(a) then
+  // run(b) still lands where run(a + b) does.
+  virtual void changed(std::span<const std::uint8_t> save) = 0;
+};
+
 // Where the OAM DMA unit is in a transfer (NESdev wiki, "DMA", Behavior and OAM DMA).
 enum class DmaStage : std::uint8_t {
   Idle,  // no transfer
@@ -158,9 +223,11 @@ struct NesState {
   // (NESdev wiki, "Open bus behavior", CPU open bus).
   std::uint8_t mdr = 0;
   std::uint64_t master = 0;  // the free-running master-cycle counter
-  // The master-cycle point the calls so far have accounted for: run() moves it on by its
-  // budget and step() by the twelve master cycles it ran. master - consumed is the
-  // overshoot the next run() is credited.
+  // The master-cycle point the calls so far have accounted for: run() moves it on by
+  // its budget as the call begins and step() by the twelve master cycles it ran. master
+  // - consumed is the overshoot the next run() is credited; inside a run(), and after
+  // one a save report threw out of, consumed stands ahead of master by what the budget
+  // still owes.
   std::uint64_t consumed = 0;
   // The master cycle the PPU's next dot falls on: the alignment at power-on, then four
   // more for every dot (NESdev wiki, "PPU frame timing", CPU-PPU Clock Alignment: the
@@ -209,19 +276,22 @@ class Nes {
   // APU), the open bus zero, the PPU with its registers at their power-on values, its
   // vertical-blank flag as the config says, its warm-up window open and its counter at
   // the first dot (NESdev wiki, "PPU power up state"), the ports empty with their
-  // registers clear, the OAM DMA unit idle, and the master counter at zero. The first
-  // seven cycles run the reset sequence to the reset vector. Throws
+  // registers clear, the OAM DMA unit idle, no observer set, and the master counter at
+  // zero. The first seven cycles run the reset sequence to the reset vector. Throws
   // std::invalid_argument as NesConfig says. A machine is copied and moved whole: the
-  // state, the image and the board go with it.
+  // state, the image, the board and the observer pointers go with it.
   explicit Nes(NesConfig config);
 
   // The whole machine as a value. state() answers the machine's own state without
   // copying it, coherent between calls at any cycle, mid-instruction included.
   // restore() replaces the mutable machine and resumes exactly there, keeping the
-  // image, the region and the alignment. It throws std::invalid_argument, and leaves
-  // the machine as it was, for a state whose PRG RAM or CHR RAM is another size than
-  // this machine's or whose board is another kind: those are the cartridge's, fixed for
-  // the machine's life, so such a state is a snapshot of another cartridge.
+  // image, the region, the alignment and the observers. It throws
+  // std::invalid_argument, and leaves the machine as it was, for a state whose PRG RAM
+  // or CHR RAM is another size than this machine's or whose board is another kind:
+  // those are the cartridge's, fixed for the machine's life, so such a state is a
+  // snapshot of another cartridge. A restore that leaves the save other than as the
+  // save observer last received it is reported to that observer, with the state in
+  // place.
   [[nodiscard]] const NesState& state() const noexcept { return state_; }
   void restore(const NesState& state);
 
@@ -235,8 +305,8 @@ class Nes {
   // (NESdev wiki, "CPU power up state", APU; "APU", Status). The PPU is as ppuReset
   // leaves it: its counter back at the top of the picture and its warm-up window open,
   // its flag, its address and its memories kept. Work RAM, PRG RAM, CHR RAM, the open
-  // bus, the strobe, the shift registers, the pads, the DMA page and the master
-  // counters keep what they hold. Call it between step() and run() calls.
+  // bus, the strobe, the shift registers, the pads, the DMA page, the master counters
+  // and the observers keep what they hold. Call it between step() and run() calls.
   void reset();
 
   // The region the machine was built for, the CPU-PPU alignment it was built with and
@@ -252,14 +322,18 @@ class Nes {
   // while the OAM DMA unit holds the bus it is the unit's get or put, and on the unit's
   // halt and alignment cycles the halted CPU repeats its read. A jammed core repeats
   // its idle read. A fresh machine's first seven cycles are the reset sequence. The
-  // overshoot run() carries is unchanged.
+  // overshoot run() carries is unchanged. A cycle that ends a frame is followed by the
+  // save observer's report, which may throw (SaveObserver) after the cycle and its
+  // twelve master cycles are accounted for.
   std::uint64_t step();
 
   // Runs whole machine cycles until the machine stands at least `budget` master cycles
   // past the point the previous call reported, and returns the master cycles the
   // machine advanced in this call. A budget that ends inside a machine cycle finishes
   // the cycle; the overshoot is credited to the next call, so run(a) then run(b) lands
-  // where run(a + b) does, and run(0) runs nothing.
+  // where run(a + b) does, and run(0) runs nothing. The budget is accounted for as the
+  // call begins: a save observer's report made inside the call may throw (SaveObserver),
+  // and the cycles not yet run are then owed to the next call, which spends them first.
   std::uint64_t run(std::uint64_t budget);
 
   // The controller in a port: a pad, or nothing, which is how the machine starts. The
@@ -269,14 +343,39 @@ class Nes {
   void setJoypad(JoypadPort port, std::optional<Joypad> pad) noexcept;
   [[nodiscard]] const std::optional<Joypad>& joypad(JoypadPort port) const noexcept;
 
+  // The observer told every access the machine makes (BusObserver, above), or none,
+  // which is how the machine starts. It is the host's object and outlives every step
+  // it is set for; it is not part of the state, so a snapshot does not carry it,
+  // restore() leaves it in place and a copied machine points at the same one. With
+  // none set an access costs one test, and the machine runs exactly as it does with
+  // one.
+  void setObserver(BusObserver* observer) noexcept { observer_ = observer; }
+  [[nodiscard]] BusObserver* observer() const noexcept { return observer_; }
+
+  // The observer told that the save has changed (SaveObserver, above), or none, which
+  // is how the machine starts; the host's object on the bus observer's terms. The
+  // bytes a report is measured against are the save as the machine was built, until a
+  // report hands the save over, whichever observer received it; so an observer set
+  // after the program has run is told, at the next frame's end, of everything stored
+  // since the last report, or since power-on when none has been made. With none set the
+  // save is never compared, and a cartridge without a battery never reports.
+  void setSaveObserver(SaveObserver* observer) noexcept { saveObserver_ = observer; }
+  [[nodiscard]] SaveObserver* saveObserver() const noexcept { return saveObserver_; }
+
+  // The save's size: the PRG RAM's on a cartridge with a battery, 0 on one without. A
+  // save observer is handed this many bytes.
+  [[nodiscard]] std::size_t saveDataSize() const noexcept;
+
  private:
   // The CPU's view of the console: the two members the core's bus concept names, each
-  // one access on the machine's bus.
+  // one access on the machine's bus made in the CPU's name.
   struct Bus {
     Nes& m;
-    std::uint8_t read(std::uint16_t address, CycleKind kind) { return m.busRead(address, kind); }
+    std::uint8_t read(std::uint16_t address, CycleKind kind) {
+      return m.busRead(address, kind, AccessSource::Cpu);
+    }
     void write(std::uint16_t address, std::uint8_t value, CycleKind kind) {
-      m.busWrite(address, value, kind);
+      m.busWrite(address, value, kind, AccessSource::Cpu);
     }
   };
 
@@ -296,10 +395,14 @@ class Nes {
   };
   [[nodiscard]] static Target decode(std::uint16_t address) noexcept;
 
-  // One access each way. Every read but $4015's, and every write, leaves its byte on
-  // the open bus. Every access moves the controller ports' clock lines first.
-  std::uint8_t busRead(std::uint16_t address, CycleKind kind);
-  void busWrite(std::uint16_t address, std::uint8_t value, CycleKind kind);
+  // One access each way, made by `source`. Every read but $4015's, and every write,
+  // leaves its byte on the open bus. Every access moves the controller ports' clock
+  // lines first and is told to the bus observer last.
+  std::uint8_t busRead(std::uint16_t address, CycleKind kind, AccessSource source);
+  void busWrite(std::uint16_t address, std::uint8_t value, CycleKind kind, AccessSource source);
+  // Tells the bus observer one access, when one is set.
+  void observe(std::uint16_t address, std::uint8_t value, bool write, CycleKind kind,
+               AccessSource source);
 
   // The controller ports' clock lines for one access: `reading` is the port whose
   // register the access reads, if any. That port's line falls or stays low; every
@@ -314,13 +417,19 @@ class Nes {
   [[nodiscard]] std::uint8_t joypadBit(std::size_t port) noexcept;
 
   // One machine cycle: the dots that fall before M2 rises, the cycle's one bus access,
-  // the dots that fall after, the NMI line, then the counters.
-  void machineCycle();
+  // the dots that fall after, the NMI line, then the counters. Answers whether one of
+  // its dots ended a frame.
+  bool machineCycle();
   // The cycle's one bus access: the OAM DMA unit's get or put while a transfer holds
   // the bus, otherwise the CPU's.
   void busCycle();
   // The CPU's cycle on the bus, halted or not.
   void cpuCycle();
+
+  // Tells the save observer the save, when one is set and the save differs from the
+  // bytes it last received, and keeps those bytes as what it received. Made after a
+  // cycle that ended a frame and by restore().
+  void reportSave();
 
   // The chip's inputs as this machine supplies them: its board and cartridge, its CHR
   // RAM, and the I/O bus decay in whole dots.
@@ -332,6 +441,12 @@ class Nes {
   Region region_;
   std::uint8_t alignment_;
   std::uint32_t ppuOpenBusDecay_;
+  BusObserver* observer_ = nullptr;
+  SaveObserver* saveObserver_ = nullptr;
+  // The save as the save observer last received it: the seed at construction, then
+  // what each report hands over. Sized with the PRG RAM on a cartridge with a battery,
+  // empty on one without; the host's view of the save, not part of the state.
+  std::vector<std::uint8_t> saveReference_;
   // Whether the cycle under way is reading $2002, which the dots that tick after the
   // read are told. Meaningful inside one machineCycle call and not part of the state.
   bool statusRead_ = false;

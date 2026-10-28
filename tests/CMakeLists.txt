@@ -93,3 +93,11 @@ target_include_directories(ppu_registers_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 # its no-operation cycles, the halt waiting for a write cycle, a reset ending a
 # transfer, a snapshot carrying one, and an NMI arriving inside one.
 neasant_add_test(nes_input_dma_test nes/input_dma_test.cpp)
+
+# The observers, the save and determinism: the bus observer told every access with its
+# byte, kind and source over an instruction mix, a register read and an OAM DMA transfer;
+# the save observer told at the end of a frame that changed the battery-backed PRG RAM
+# and after a restore that changes it, with the terms a report throws on; two machines
+# built alike, run differently and restored one from the other, equal state by state and
+# access by access.
+neasant_add_test(nes_observers_test nes/observers_test.cpp)

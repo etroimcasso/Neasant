@@ -1,5 +1,6 @@
 #include "neasant/nes/nes.h"
 
+#include <algorithm>
 #include <cctype>
 #include <stdexcept>
 #include <string>
@@ -109,7 +110,7 @@ Nes::Nes(NesConfig config)
       alignment_(config.alignment),
       ppuOpenBusDecay_(config.ppuOpenBusDecay) {
   if (config.region != Region::Ntsc) {
-    throw std::invalid_argument("PAL and Dendy are not yet selectable; NTSC is");
+    throw std::invalid_argument("PAL and Dendy are not built; NTSC is");
   }
   if (config.alignment > 3) {
     throw std::invalid_argument("an alignment of " +
@@ -147,6 +148,8 @@ Nes::Nes(NesConfig config)
   // to 3 master cycles before the PPU's nearest following dot.
   state_.dotClock = config.alignment;
   state_.cpu = cpu_.state();
+  // The save as the host has it before anything is stored: the seed.
+  if (cartridge_.battery) saveReference_ = state_.prgRam;
 }
 
 void Nes::restore(const NesState& state) {
@@ -168,6 +171,7 @@ void Nes::restore(const NesState& state) {
   }
   state_ = state;
   cpu_.restore(state.cpu);
+  reportSave();
 }
 
 void Nes::reset() {
@@ -191,16 +195,20 @@ void Nes::reset() {
 }
 
 std::uint64_t Nes::step() {
-  machineCycle();
+  const bool frameEnded = machineCycle();
   state_.consumed += kMasterCyclesPerCpuCycle;
+  if (frameEnded) reportSave();
   return kMasterCyclesPerCpuCycle;
 }
 
 std::uint64_t Nes::run(std::uint64_t budget) {
   const std::uint64_t start = state_.master;
-  const std::uint64_t target = state_.consumed + budget;
-  while (state_.master < target) machineCycle();
-  state_.consumed = target;
+  // The budget is accounted for before it is spent, so a save report that throws out
+  // of the loop leaves the cycles not yet run owed to the next call.
+  state_.consumed += budget;
+  while (state_.master < state_.consumed) {
+    if (machineCycle()) reportSave();
+  }
   return state_.master - start;
 }
 
@@ -210,6 +218,25 @@ void Nes::setJoypad(JoypadPort port, std::optional<Joypad> pad) noexcept {
 
 const std::optional<Joypad>& Nes::joypad(JoypadPort port) const noexcept {
   return state_.pads[static_cast<std::size_t>(port)];
+}
+
+std::size_t Nes::saveDataSize() const noexcept {
+  return cartridge_.battery ? state_.prgRam.size() : 0;
+}
+
+void Nes::observe(std::uint16_t address, std::uint8_t value, bool write, CycleKind kind,
+                  AccessSource source) {
+  if (observer_ == nullptr) return;
+  observer_->access(BusAccess{
+      .address = address, .value = value, .write = write, .kind = kind, .source = source});
+}
+
+void Nes::reportSave() {
+  if (saveObserver_ == nullptr || saveReference_.empty()) return;
+  if (state_.prgRam == saveReference_) return;
+  // The reference is taken before the report, so a report that throws is not made again.
+  std::copy(state_.prgRam.begin(), state_.prgRam.end(), saveReference_.begin());
+  saveObserver_->changed(state_.prgRam);
 }
 
 PpuInputs Nes::ppuInputs() noexcept {
@@ -272,12 +299,13 @@ std::uint8_t Nes::joypadBit(std::size_t port) noexcept {
   return static_cast<std::uint8_t>(state_.shift[port] & 0x01u);
 }
 
-std::uint8_t Nes::busRead(std::uint16_t address, CycleKind) {
+std::uint8_t Nes::busRead(std::uint16_t address, CycleKind kind, AccessSource source) {
   const Target target = decode(address);
   clockJoypads(target == Target::JoypadOne   ? std::optional<std::size_t>{0}
                : target == Target::JoypadTwo ? std::optional<std::size_t>{1}
                                              : std::nullopt);
   std::uint8_t value = state_.mdr;
+  bool leavesBus = false;
   switch (target) {
     case Target::WorkRam:
       // NESdev wiki, "CPU memory map": 2 KB at $0000-$07FF, repeated through $1FFF.
@@ -296,7 +324,9 @@ std::uint8_t Nes::busRead(std::uint16_t address, CycleKind) {
       // counters and flags this machine does not hold; the external data bus is
       // disconnected for the read, so the open bus keeps the value of the last cycle
       // that did not read $4015.
-      return static_cast<std::uint8_t>(state_.mdr & 0x20u);
+      value = static_cast<std::uint8_t>(state_.mdr & 0x20u);
+      leavesBus = true;
+      break;
     case Target::JoypadOne:
     case Target::JoypadTwo:
       // NESdev wiki, "Controller reading", $4016 / $4017 Read and Unconnected data lines
@@ -322,11 +352,13 @@ std::uint8_t Nes::busRead(std::uint16_t address, CycleKind) {
     }
   }
   // NESdev wiki, "Open bus behavior", CPU open bus: the last byte read.
-  state_.mdr = value;
+  if (!leavesBus) state_.mdr = value;
+  observe(address, value, false, kind, source);
   return value;
 }
 
-void Nes::busWrite(std::uint16_t address, std::uint8_t value, CycleKind) {
+void Nes::busWrite(std::uint16_t address, std::uint8_t value, CycleKind kind,
+                   AccessSource source) {
   // NESdev wiki, "Controller reading", Clock timing: a write is not a read of a port's
   // register, so it raises every clock line.
   clockJoypads(std::nullopt);
@@ -377,6 +409,7 @@ void Nes::busWrite(std::uint16_t address, std::uint8_t value, CycleKind) {
   // NESdev wiki, "Open bus behavior", Electrical basis: a value placed on the data bus
   // floats there to be read again.
   state_.mdr = value;
+  observe(address, value, true, kind, source);
 }
 
 void Nes::cpuCycle() {
@@ -402,20 +435,20 @@ void Nes::busCycle() {
       // NESdev wiki, "DMA", Cadence and OAM DMA: the unit reads on a get cycle only, so
       // a put cycle before the read is an alignment cycle, on which the halted CPU
       // repeats its read (Register conflicts). The read goes through the bus as the
-      // CPU's would.
+      // CPU's would, in the unit's name.
       if (state_.apuPhase != kGetHalf) {
         cpuCycle();
         return;
       }
       dma.byte = busRead(static_cast<std::uint16_t>((dma.page << 8) | dma.index),
-                         CycleKind::DataRead);
+                         CycleKind::DataRead, AccessSource::OamDma);
       dma.stage = DmaStage::Put;
       return;
     case DmaStage::Put:
       // NESdev wiki, "DMA", OAM DMA: the byte is written to $2004 on the put cycle that
       // follows its get; after the 256th the CPU is released and performs the read it
       // was halted on.
-      busWrite(kOamDataPort, dma.byte, CycleKind::DataWrite);
+      busWrite(kOamDataPort, dma.byte, CycleKind::DataWrite, AccessSource::OamDma);
       if (dma.index == 255) {
         dma.index = 0;
         dma.stage = DmaStage::Idle;
@@ -428,7 +461,7 @@ void Nes::busCycle() {
   }
 }
 
-void Nes::machineCycle() {
+bool Nes::machineCycle() {
   // The dots whose master cycle falls before M2 rises, then the cycle's one access,
   // then the dots that fall after it, which a read of $2002 under way is told (NESdev
   // wiki, "PPU frame timing", VBL Flag Timing), then the NMI output as the CPU samples
@@ -436,20 +469,22 @@ void Nes::machineCycle() {
   // the edge detector polls the line during the second half of each cycle).
   const std::uint64_t access = state_.master + kMasterCyclesToM2Rise;
   const std::uint64_t end = state_.master + kMasterCyclesPerCpuCycle;
+  bool frameEnded = false;
   while (state_.dotClock < access) {
-    ppuTickDot(state_.ppu, false);
+    if (ppuTickDot(state_.ppu, false)) frameEnded = true;
     state_.dotClock += kMasterCyclesPerDot;
   }
   statusRead_ = false;
   busCycle();
   while (state_.dotClock < end) {
-    ppuTickDot(state_.ppu, statusRead_);
+    if (ppuTickDot(state_.ppu, statusRead_)) frameEnded = true;
     state_.dotClock += kMasterCyclesPerDot;
   }
   cpu_.setNmiLine(ppuNmiAsserted(state_.ppu));
   state_.master = end;
   state_.apuPhase = static_cast<std::uint8_t>(state_.apuPhase ^ 1u);
   state_.cpu = cpu_.state();
+  return frameEnded;
 }
 
 }  // namespace neasant
