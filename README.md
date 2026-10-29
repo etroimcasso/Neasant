@@ -76,9 +76,11 @@ visible reason, until they are pointed at a local copy.
 | Option | Points at |
 |---|---|
 | `NEASANT_NES6502_VECTORS` | the SingleStepTests `65x02/nes6502/v1` directory |
+| `NEASANT_NES_TEST_ROMS` | a clone of `christopherpow/nes-test-roms`, the self-checking NES test programs |
 
 ```
-cmake -B build -DNEASANT_NES6502_VECTORS=/path/to/65x02/nes6502/v1
+cmake -B build -DNEASANT_NES6502_VECTORS=/path/to/65x02/nes6502/v1 \
+               -DNEASANT_NES_TEST_ROMS=/path/to/nes-test-roms
 ```
 
 `NEASANT_BUILD_TESTS` turns the suite on or off explicitly.

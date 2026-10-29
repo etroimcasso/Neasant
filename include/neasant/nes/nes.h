@@ -64,6 +64,12 @@ struct NesConfig {
   // internal open bus"); the default is the thread's reading for an NTSC NES at
   // power-on, $A00 counts of 15 CPU cycles, 38 400 CPU cycles.
   std::uint32_t ppuOpenBusDecay = 460800;
+  // The constant the CPU's ANE and LXA OR into the accumulator, which the hardware leaves
+  // to the chip and its conditions (64doc, "6510/8502 Undocumented Commands"; No More
+  // Secrets, "'Magic Constant' group"). The default is the 2A03's measured value: blargg's
+  // instr_test-v5 expects LXA #imm to leave its operand in A and X, which only $FF gives
+  // (its 03-immediate source: the checksum for ATX #n is TAX's).
+  std::uint8_t unstableConstant = 0xFF;
   // The pattern every RAM is filled with at power-on, repeated from its start; empty
   // fills with $00. The hardware leaves RAM unreliable at power-on (NESdev wiki, "CPU
   // power up state", RAM contents) and the PPU's memories unspecified (NESdev wiki,
@@ -309,12 +315,13 @@ class Nes {
   // and the observers keep what they hold. Call it between step() and run() calls.
   void reset();
 
-  // The region the machine was built for, the CPU-PPU alignment it was built with and
-  // the I/O bus decay it was built with, in master cycles, all fixed for its life like
-  // the image.
+  // The region the machine was built for, the CPU-PPU alignment it was built with, the
+  // I/O bus decay it was built with, in master cycles, and the constant its CPU's ANE and
+  // LXA OR into the accumulator, all fixed for its life like the image.
   [[nodiscard]] Region region() const noexcept { return region_; }
   [[nodiscard]] std::uint8_t alignment() const noexcept { return alignment_; }
   [[nodiscard]] std::uint32_t ppuOpenBusDecay() const noexcept { return ppuOpenBusDecay_; }
+  [[nodiscard]] std::uint8_t unstableConstant() const noexcept { return cpu_.unstableConstant(); }
 
   // Runs one machine cycle, one CPU cycle, and returns its master cycles, twelve: the
   // PPU runs the dots that fall inside the cycle, one bus access lands among them, and

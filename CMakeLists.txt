@@ -18,6 +18,9 @@ option(NEASANT_BUILD_TESTS "Build the test suite" ${NEASANT_IS_TOP_LEVEL})
 set(NEASANT_NES6502_VECTORS "" CACHE PATH
     "Directory holding the SingleStepTests 65x02/nes6502/v1 vector files")
 
+set(NEASANT_NES_TEST_ROMS "" CACHE PATH
+    "Directory holding a clone of christopherpow/nes-test-roms")
+
 # ── Build type ──────────────────────────────────────────────────────────────
 # A build is optimized by default. Debug is an explicit, temporary opt-in.
 if(NEASANT_IS_TOP_LEVEL AND NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)

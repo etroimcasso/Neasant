@@ -105,7 +105,7 @@ std::uint8_t Joypad::bits() const noexcept {
 }
 
 Nes::Nes(NesConfig config)
-    : cpu_(powerOn()),
+    : cpu_(powerOn(), config.unstableConstant),
       region_(config.region),
       alignment_(config.alignment),
       ppuOpenBusDecay_(config.ppuOpenBusDecay) {

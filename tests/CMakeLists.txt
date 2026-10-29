@@ -101,3 +101,12 @@ neasant_add_test(nes_input_dma_test nes/input_dma_test.cpp)
 # built alike, run differently and restored one from the other, equal state by state and
 # access by access.
 neasant_add_test(nes_observers_test nes/observers_test.cpp)
+
+# The CPU proven on the self-checking test programs: each ROM booted on the machine, run
+# frame by frame to its report, and the report read out of the state value, the status
+# byte and text at $6000 for the programs that write them and the console's nametable for
+# the ones that print. An empty NEASANT_NES_TEST_ROMS skips each case with the variable
+# named; a program that needs hardware the machine does not hold skips naming it.
+neasant_add_test(nes_blargg_cpu_test nes/blargg_cpu_test.cpp nes/rom_harness.cpp)
+target_compile_definitions(nes_blargg_cpu_test PRIVATE
+  NEASANT_NES_TEST_ROMS="${NEASANT_NES_TEST_ROMS}")
