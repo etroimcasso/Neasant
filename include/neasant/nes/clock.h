@@ -20,7 +20,7 @@ enum class Region : std::uint8_t { Ntsc, Pal, Dendy };
 // a dot, 357 368, the length of a frame with rendering disabled (NESdev wiki, "PPU
 // frame timing", Even/Odd Frames and CPU-PPU Clock Alignment). PAL and Dendy share a
 // clock of 53 203 425 / 2 Hz, six times 4 433 618.75 Hz (NESdev wiki, "CPU",
-// Frequencies); their frames are not yet stated and read as 0.
+// Frequencies); their frames are not stated and read as 0.
 struct ConsoleClock {
   std::uint64_t masterCyclesPerFrame = 0;
   std::uint64_t hertzNumerator = 0;
@@ -78,7 +78,7 @@ class FrameDeadline {
 
 // NTSC's first frame and the frame one past the point a single product passes 64
 // bits, worked out by hand, so a rearrangement that loses the fraction or wraps does
-// not compile; PAL and Dendy have no frame length yet, so their deadlines are 0.
+// not compile; PAL and Dendy have no frame length stated, so their deadlines are 0.
 static_assert(FrameDeadline(Region::Ntsc).owedAt(1u) == 16639356ull);
 static_assert(FrameDeadline(Region::Ntsc).owedAt(4693u) == 78088500588ull);
 static_assert(FrameDeadline(Region::Pal).owedAt(1u) == 0ull);

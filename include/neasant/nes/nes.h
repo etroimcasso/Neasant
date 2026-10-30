@@ -345,8 +345,9 @@ class Nes {
 
   // The controller in a port: a pad, or nothing, which is how the machine starts. The
   // pad is part of the state: a snapshot carries it and restore() puts it back. The
-  // program sees a change when the port's register next fills from the buttons: at
-  // every read while the strobe is high, and at the write that drops it.
+  // program sees a change when the port's register next fills from the buttons: at every
+  // write to $4016 but one that leaves the strobe low, and at every read and every clock
+  // of the port while the strobe is high.
   void setJoypad(JoypadPort port, std::optional<Joypad> pad) noexcept;
   [[nodiscard]] const std::optional<Joypad>& joypad(JoypadPort port) const noexcept;
 

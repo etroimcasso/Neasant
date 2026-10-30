@@ -153,7 +153,7 @@ struct DmaBus : RecordingBus {
   std::uint16_t dmcAddress = 0;
   std::uint8_t dmcSample = 0;
 
-  // Schedules a DMC fetch. The test drops RDY itself, as the machine will.
+  // Schedules a DMC fetch. The test drops RDY itself, as a DMA unit does.
   void requestDmc(std::uint16_t address) {
     unit = Unit::Dmc;
     dmcAddress = address;

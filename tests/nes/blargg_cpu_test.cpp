@@ -95,7 +95,7 @@ void expectPass(const std::string& relative, Report report,
                              << result.text << "\n------------";
 }
 
-// Registers a program the machine cannot yet run: the file is looked for as above, so a
+// Registers a program the machine cannot run: the file is looked for as above, so a
 // required clone that lacks it fails, and the case then skips naming what it needs.
 void skipNeeding(const std::string& relative, const std::string& needs) {
   std::optional<Bytes> image;
