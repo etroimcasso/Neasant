@@ -17,6 +17,10 @@ env:
 # absent vector set into a hard failure, so a green run has provably executed the
 # whole oracle rather than skipping it — the point of running on every architecture
 # is to prove the interpreter produces identical results on each.
+#
+# The self-checking test programs (christopherpow/nes-test-roms) are staged the same way,
+# once per runner at the commit the tests were read against, and
+# NEASANT_REQUIRE_NES_TEST_ROMS turns an absent or wrong clone into a failure.
 
 jobs:
 
@@ -41,11 +45,25 @@ jobs:
           fi
           echo "NES6502_VECTORS=$VECS/nes6502/v1" >> "$GITHUB_ENV"
 
+      - name: Stage nes-test-roms
+        run: |
+          set -eo pipefail
+          ROMS="$HOME/neasant-nes-test-roms"
+          PIN=95d8f621ae55cee0d09b91519a8989ae0e64753b
+          if [ "$(git -C "$ROMS" rev-parse HEAD 2>/dev/null)" != "$PIN" ]; then
+            rm -rf "$ROMS"
+            git init -q "$ROMS"
+            git -C "$ROMS" fetch -q --depth 1 https://github.com/christopherpow/nes-test-roms.git "$PIN"
+            git -C "$ROMS" checkout -q FETCH_HEAD
+          fi
+          echo "NES_TEST_ROMS=$ROMS" >> "$GITHUB_ENV"
+
       - name: Configure
         run: |
           cmake -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build" \
             -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DNEASANT_NES6502_VECTORS="$NES6502_VECTORS"
+            -DNEASANT_NES6502_VECTORS="$NES6502_VECTORS" \
+            -DNEASANT_NES_TEST_ROMS="$NES_TEST_ROMS"
 
       - name: Build
         run: cmake --build "$GITHUB_WORKSPACE/build" --parallel
@@ -56,6 +74,7 @@ jobs:
       - name: Test
         env:
           NEASANT_REQUIRE_NES6502_VECTORS: '1'
+          NEASANT_REQUIRE_NES_TEST_ROMS: '1'
         run: |
           set -o pipefail
           mkdir -p "$GITHUB_WORKSPACE/ci-output"
@@ -91,6 +110,21 @@ jobs:
           }
           "NES6502_VECTORS=$VECS/nes6502/v1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: Stage nes-test-roms
+        shell: powershell
+        run: |
+          $ROMS = "$($env:USERPROFILE -replace '\\','/')/neasant-nes-test-roms"
+          $PIN = "95d8f621ae55cee0d09b91519a8989ae0e64753b"
+          $head = ""
+          if (Test-Path $ROMS) { $head = "$(git -C $ROMS rev-parse HEAD 2>$null)" }
+          if ($head -ne $PIN) {
+            if (Test-Path $ROMS) { Remove-Item $ROMS -Recurse -Force }
+            git init -q $ROMS
+            git -C $ROMS fetch -q --depth 1 https://github.com/christopherpow/nes-test-roms.git $PIN
+            git -C $ROMS checkout -q FETCH_HEAD
+          }
+          "NES_TEST_ROMS=$ROMS" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Clean CMake cache (preserve downloads)
         shell: powershell
         run: |
@@ -110,7 +144,8 @@ jobs:
         run: |
           cmake -S $env:GITHUB_WORKSPACE -B C:\neasant-ci-build `
             -G "Visual Studio 17 2022" -A x64 `
-            -DNEASANT_NES6502_VECTORS="$env:NES6502_VECTORS"
+            -DNEASANT_NES6502_VECTORS="$env:NES6502_VECTORS" `
+            -DNEASANT_NES_TEST_ROMS="$env:NES_TEST_ROMS"
 
       - name: Build
         shell: powershell
@@ -120,6 +155,7 @@ jobs:
         shell: powershell
         env:
           NEASANT_REQUIRE_NES6502_VECTORS: '1'
+          NEASANT_REQUIRE_NES_TEST_ROMS: '1'
         run: |
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\ci-output" | Out-Null
           $results = "$env:GITHUB_WORKSPACE\ci-output\windows-x64-results.txt"
@@ -158,11 +194,25 @@ jobs:
           fi
           echo "NES6502_VECTORS=$VECS/nes6502/v1" >> "$GITHUB_ENV"
 
+      - name: Stage nes-test-roms
+        run: |
+          set -eo pipefail
+          ROMS="$HOME/neasant-nes-test-roms"
+          PIN=95d8f621ae55cee0d09b91519a8989ae0e64753b
+          if [ "$(git -C "$ROMS" rev-parse HEAD 2>/dev/null)" != "$PIN" ]; then
+            rm -rf "$ROMS"
+            git init -q "$ROMS"
+            git -C "$ROMS" fetch -q --depth 1 https://github.com/christopherpow/nes-test-roms.git "$PIN"
+            git -C "$ROMS" checkout -q FETCH_HEAD
+          fi
+          echo "NES_TEST_ROMS=$ROMS" >> "$GITHUB_ENV"
+
       - name: Configure
         run: |
           cmake -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build" \
             -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DNEASANT_NES6502_VECTORS="$NES6502_VECTORS"
+            -DNEASANT_NES6502_VECTORS="$NES6502_VECTORS" \
+            -DNEASANT_NES_TEST_ROMS="$NES_TEST_ROMS"
 
       - name: Build
         run: cmake --build "$GITHUB_WORKSPACE/build" --parallel
@@ -173,6 +223,7 @@ jobs:
       - name: Test
         env:
           NEASANT_REQUIRE_NES6502_VECTORS: '1'
+          NEASANT_REQUIRE_NES_TEST_ROMS: '1'
         run: |
           set -o pipefail
           mkdir -p "$GITHUB_WORKSPACE/ci-output"
@@ -212,11 +263,25 @@ jobs:
           fi
           echo "NES6502_VECTORS=$VECS/nes6502/v1" >> "$GITHUB_ENV"
 
+      - name: Stage nes-test-roms
+        run: |
+          set -eo pipefail
+          ROMS="$HOME/neasant-nes-test-roms"
+          PIN=95d8f621ae55cee0d09b91519a8989ae0e64753b
+          if [ "$(git -C "$ROMS" rev-parse HEAD 2>/dev/null)" != "$PIN" ]; then
+            rm -rf "$ROMS"
+            git init -q "$ROMS"
+            git -C "$ROMS" fetch -q --depth 1 https://github.com/christopherpow/nes-test-roms.git "$PIN"
+            git -C "$ROMS" checkout -q FETCH_HEAD
+          fi
+          echo "NES_TEST_ROMS=$ROMS" >> "$GITHUB_ENV"
+
       - name: Configure
         run: |
           cmake -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build" \
             -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DNEASANT_NES6502_VECTORS="$NES6502_VECTORS"
+            -DNEASANT_NES6502_VECTORS="$NES6502_VECTORS" \
+            -DNEASANT_NES_TEST_ROMS="$NES_TEST_ROMS"
 
       - name: Build
         run: cmake --build "$GITHUB_WORKSPACE/build" --parallel
@@ -227,6 +292,7 @@ jobs:
       - name: Test
         env:
           NEASANT_REQUIRE_NES6502_VECTORS: '1'
+          NEASANT_REQUIRE_NES_TEST_ROMS: '1'
         run: |
           set -o pipefail
           mkdir -p "$GITHUB_WORKSPACE/ci-output"
@@ -264,6 +330,21 @@ jobs:
           }
           "NES6502_VECTORS=$VECS/nes6502/v1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: Stage nes-test-roms
+        shell: powershell
+        run: |
+          $ROMS = "$($env:USERPROFILE -replace '\\','/')/neasant-nes-test-roms"
+          $PIN = "95d8f621ae55cee0d09b91519a8989ae0e64753b"
+          $head = ""
+          if (Test-Path $ROMS) { $head = "$(git -C $ROMS rev-parse HEAD 2>$null)" }
+          if ($head -ne $PIN) {
+            if (Test-Path $ROMS) { Remove-Item $ROMS -Recurse -Force }
+            git init -q $ROMS
+            git -C $ROMS fetch -q --depth 1 https://github.com/christopherpow/nes-test-roms.git $PIN
+            git -C $ROMS checkout -q FETCH_HEAD
+          }
+          "NES_TEST_ROMS=$ROMS" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Clean CMake cache (preserve downloads)
         shell: powershell
         run: |
@@ -283,7 +364,8 @@ jobs:
         run: |
           cmake -S $env:GITHUB_WORKSPACE -B C:\neasant-ci-build `
             -G "Visual Studio 17 2022" -A ARM64 `
-            -DNEASANT_NES6502_VECTORS="$env:NES6502_VECTORS"
+            -DNEASANT_NES6502_VECTORS="$env:NES6502_VECTORS" `
+            -DNEASANT_NES_TEST_ROMS="$env:NES_TEST_ROMS"
 
       - name: Build
         shell: powershell
@@ -293,6 +375,7 @@ jobs:
         shell: powershell
         env:
           NEASANT_REQUIRE_NES6502_VECTORS: '1'
+          NEASANT_REQUIRE_NES_TEST_ROMS: '1'
         run: |
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\ci-output" | Out-Null
           $results = "$env:GITHUB_WORKSPACE\ci-output\windows-arm64-results.txt"

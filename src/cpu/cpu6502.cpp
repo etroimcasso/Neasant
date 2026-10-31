@@ -344,13 +344,6 @@ constexpr bool highByteStoresAreIndexed() {
 static_assert(highByteStoresAreIndexed(),
               "SHA, SHX, SHY and TAS are absolute indexed or indirect indexed");
 
-// The constant ANE and LXA OR into the accumulator ahead of their ANDs (64doc,
-// "6510/8502 Undocumented Commands": A = (A | #$EE) & X & #byte; No More Secrets,
-// "'Magic Constant' group" and "LAX #imm", which advises $EE for emulation). On the
-// chip the value varies with the unit, its temperature and the RDY line; the core
-// holds it fixed.
-constexpr std::uint8_t kUnstableConstant = 0xEE;
-
 }  // namespace
 
 const Opcode& opcodeAt(std::uint8_t code) noexcept { return kOpcodeTable[code]; }
@@ -446,13 +439,13 @@ void Cpu6502::applyRead(Mnemonic mnemonic, std::uint8_t value) noexcept {
     }
     // ANE ORs the constant into A, then ANDs X and the operand into it.
     case Mnemonic::Ane:
-      state_.a = static_cast<std::uint8_t>((state_.a | kUnstableConstant) & state_.x & value);
+      state_.a = static_cast<std::uint8_t>((state_.a | unstableConstant_) & state_.x & value);
       setNZ(state_.a);
       break;
     // LXA ORs the constant into A, ANDs the operand into it, and loads X with the
     // result.
     case Mnemonic::Lxa:
-      state_.a = static_cast<std::uint8_t>((state_.a | kUnstableConstant) & value);
+      state_.a = static_cast<std::uint8_t>((state_.a | unstableConstant_) & value);
       state_.x = state_.a;
       setNZ(state_.a);
       break;

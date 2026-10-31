@@ -198,15 +198,28 @@ inline constexpr bool kUnstable = true;
 
 // ---- the core -------------------------------------------------------------------
 
+// The constant ANE and LXA OR into the accumulator ahead of their ANDs, as the documents
+// state it for the 6510: $EE (64doc, "6510/8502 Undocumented Commands": A = (A | #$EE) & X
+// & #byte; No More Secrets, "'Magic Constant' group" and "LAX #imm", which advises $EE for
+// emulation). On the chip the value varies with the unit, its temperature and the RDY line,
+// so a core takes the value its chip is measured to hold when it is built.
+inline constexpr std::uint8_t kDocumentedUnstableConstant = 0xEE;
+
 class Cpu6502 {
  public:
-  // A default-constructed core holds a default state and fetches from $0000 when
-  // stepped. A host that wants a power-on builds from powerOn().
+  // A default-constructed core holds a default state and the documents' constant, and
+  // fetches from $0000 when stepped. A host that wants a power-on builds from powerOn(),
+  // and one whose chip is measured to hold another constant states it.
   Cpu6502() = default;
-  explicit Cpu6502(Cpu6502State state) : state_(state) {}
+  explicit Cpu6502(Cpu6502State state,
+                   std::uint8_t unstableConstant = kDocumentedUnstableConstant)
+      : state_(state), unstableConstant_(unstableConstant) {}
 
   [[nodiscard]] const Cpu6502State& state() const noexcept { return state_; }
   void restore(Cpu6502State state) noexcept { state_ = state; }
+
+  // The constant ANE and LXA OR into the accumulator, fixed for the core's life.
+  [[nodiscard]] std::uint8_t unstableConstant() const noexcept { return unstableConstant_; }
 
   // Executes exactly one CPU cycle: one read or one write through the bus. While
   // the RDY line is low a read cycle is repeated as a Halted read of the same
@@ -572,6 +585,7 @@ class Cpu6502 {
   }
 
   Cpu6502State state_{};
+  std::uint8_t unstableConstant_ = kDocumentedUnstableConstant;
   // Whether the read of the cycle under way was halted by RDY. Meaningful only
   // inside one stepCycle call; nothing between cycles reads it.
   bool halted_ = false;

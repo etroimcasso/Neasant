@@ -32,16 +32,17 @@ embeddable. Pronounced "NESn't," like Peasant with an N.
 
 ## What is built
 
-The CPU is built and documented; the rest of the machine follows it. This table gains a row's
-link and description as each component lands.
+The CPU, the machine around it and the cartridge are built and documented; the PPU holds its
+register file and frame timing with no picture, and NROM is the one board. This table gains a
+row's link and description as each component lands.
 
 | Component | Status |
 |---|---|
 | [6502 CPU core](docs/6502-cpu.md) | **complete** — 256 opcodes, cycle-stepped, every cycle checked against the SingleStepTests nes6502 vectors; the reset, interrupt and RDY-halt sequences cycle by cycle |
-| Machine (bus, RAM, cartridge boundary, controllers) | **not started** |
-| PPU | **not started** |
+| [Machine (bus, RAM, cartridge boundary, controllers)](docs/nes-machine.md) | **complete** — the master-cycle budget, the console's bus and open bus, the two controller ports, OAM DMA, the bus and save observers, snapshot and restore; the CPU's self-checking test programs pass on it |
+| [PPU](docs/ppu.md) | **in progress** — the register file, the frame's timing and the NMI, with no picture |
 | APU | **not started** |
-| Mappers | **not started** |
+| [Mappers](docs/nes-cartridge.md) | **in progress** — the cartridge as a value, the pin-level board boundary, NROM |
 | Peripherals | **not started** |
 | Player | **not started** |
 | PAL and Dendy variants | **not started** |
@@ -76,9 +77,11 @@ visible reason, until they are pointed at a local copy.
 | Option | Points at |
 |---|---|
 | `NEASANT_NES6502_VECTORS` | the SingleStepTests `65x02/nes6502/v1` directory |
+| `NEASANT_NES_TEST_ROMS` | a clone of `christopherpow/nes-test-roms`, the self-checking NES test programs |
 
 ```
-cmake -B build -DNEASANT_NES6502_VECTORS=/path/to/65x02/nes6502/v1
+cmake -B build -DNEASANT_NES6502_VECTORS=/path/to/65x02/nes6502/v1 \
+               -DNEASANT_NES_TEST_ROMS=/path/to/nes-test-roms
 ```
 
 `NEASANT_BUILD_TESTS` turns the suite on or off explicitly.

@@ -108,7 +108,9 @@ void runCase(int opcode, const VectorCase& c, RecordingBus& bus) {
 
   // The registers.
   const Cpu6502State& s = cpu.state();
-  if (!isJam(opcode)) EXPECT_EQ(int{s.pc}, int{c.final_.pc}) << c.name << ": pc";
+  if (!isJam(opcode)) {
+    EXPECT_EQ(int{s.pc}, int{c.final_.pc}) << c.name << ": pc";
+  }
   EXPECT_EQ(int{s.s}, int{c.final_.s}) << c.name << ": s";
   EXPECT_EQ(int{s.a}, int{c.final_.a}) << c.name << ": a";
   EXPECT_EQ(int{s.x}, int{c.final_.x}) << c.name << ": x";
@@ -181,9 +183,9 @@ TEST_P(Cpu6502Vectors, MatchesTraceAndFinalState) {
 }
 
 INSTANTIATE_TEST_SUITE_P(AllOpcodes, Cpu6502Vectors, ::testing::Range(0, 256),
-                         [](const ::testing::TestParamInfo<int>& info) {
+                         [](const ::testing::TestParamInfo<int>& parameter) {
                            char label[8];
-                           std::snprintf(label, sizeof label, "op%02X", info.param);
+                           std::snprintf(label, sizeof label, "op%02X", parameter.param);
                            return std::string(label);
                          });
 

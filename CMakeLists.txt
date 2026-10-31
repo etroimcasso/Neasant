@@ -18,6 +18,9 @@ option(NEASANT_BUILD_TESTS "Build the test suite" ${NEASANT_IS_TOP_LEVEL})
 set(NEASANT_NES6502_VECTORS "" CACHE PATH
     "Directory holding the SingleStepTests 65x02/nes6502/v1 vector files")
 
+set(NEASANT_NES_TEST_ROMS "" CACHE PATH
+    "Directory holding a clone of christopherpow/nes-test-roms")
+
 # ── Build type ──────────────────────────────────────────────────────────────
 # A build is optimized by default. Debug is an explicit, temporary opt-in.
 if(NEASANT_IS_TOP_LEVEL AND NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
@@ -38,10 +41,25 @@ if(NEASANT_IS_TOP_LEVEL)
   endif()
 endif()
 
+# ── Warning flags ───────────────────────────────────────────────────────────
+# One list for the library and for every test executable, so a header compiles
+# without a warning wherever its templates are instantiated.
+if(MSVC)
+  set(NEASANT_WARNING_FLAGS /W4 /permissive- /Zc:__cplusplus)
+else()
+  set(NEASANT_WARNING_FLAGS
+    -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion)
+endif()
+
 # ── The library ─────────────────────────────────────────────────────────────
 add_library(neasant STATIC
   src/version.cpp
   src/cpu/cpu6502.cpp
+  src/nes/cartridge.cpp
+  src/nes/board.cpp
+  src/mappers/nrom.cpp
+  src/ppu/ppu.cpp
+  src/nes/nes.cpp
 )
 add_library(neasant::neasant ALIAS neasant)
 
@@ -49,16 +67,12 @@ target_include_directories(neasant PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
 )
 target_compile_features(neasant PUBLIC cxx_std_20)
+target_compile_options(neasant PRIVATE ${NEASANT_WARNING_FLAGS})
 
-if(MSVC)
-  target_compile_options(neasant PRIVATE /W4 /permissive- /Zc:__cplusplus)
-else()
-  target_compile_options(neasant PRIVATE
-    -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion
-    # Each function and datum in its own section so a consumer's final link
-    # can drop what it never references.
-    -ffunction-sections -fdata-sections
-  )
+if(NOT MSVC)
+  # Each function and datum in its own section so a consumer's final link
+  # can drop what it never references.
+  target_compile_options(neasant PRIVATE -ffunction-sections -fdata-sections)
 endif()
 
 # ── Tests ───────────────────────────────────────────────────────────────────
