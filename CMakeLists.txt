@@ -59,6 +59,7 @@ add_library(neasant STATIC
   src/nes/board.cpp
   src/mappers/nrom.cpp
   src/ppu/ppu.cpp
+  src/apu/apu.cpp
   src/nes/nes.cpp
 )
 add_library(neasant::neasant ALIAS neasant)

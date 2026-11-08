@@ -25,7 +25,9 @@ namespace neasant::nes_tests {
 // the reset button, below $80 its result, 0 a pass and any other value the failure's
 // code; the text from $6004 up to a zero byte. Screen: the text the program prints to
 // the nametable at $2000, one character code a tile; "Passed" or "PASSED" is a pass,
-// "Failed", "FAILED", "Error" or "INTERNAL" a failure.
+// "Failed", "FAILED", "Error" or "INTERNAL" a failure; a result code printed as `$` and
+// two hexadecimal digits, the last on the screen, is a pass as `$01` and a failure
+// otherwise.
 enum class Report : std::uint8_t { Memory, Screen };
 
 // What a run found: whether the program reported before the guard ran out, whether it

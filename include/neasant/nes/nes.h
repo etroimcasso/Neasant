@@ -2,9 +2,9 @@
 
 // The NES as a machine around the 6502: the master clock and its budget, the bus as the
 // console decodes it, the 2 KB of work RAM, the open bus, the PPU with its ports, its
-// memories, its frame and its NMI output, the APU's registers as the bytes written to
-// them, the two controller ports with the pads plugged into them, the OAM DMA unit on
-// the CPU's RDY line, and the cartridge on its board behind the pins.
+// memories, its frame and its NMI output, the APU's frame counter, length counters and
+// status register, the two controller ports with the pads plugged into them, the OAM DMA
+// unit on the CPU's RDY line, and the cartridge on its board behind the pins.
 //
 // A machine is built from one config value and is at power-on from then: the CPU's
 // reset sequence is pending, every RAM holds the seed, and the first seven cycles run
@@ -12,8 +12,9 @@
 // master-cycle budget in whole machine cycles and carries the overshoot, so run(a) then
 // run(b) lands where run(a + b) does. One machine cycle is one CPU cycle, twelve master
 // cycles: the PPU runs every dot whose master cycle falls inside it, one every four,
-// the cycle's one bus access lands after the dots that fall before M2 rises, and the
-// CPU samples the PPU's NMI output as the cycle ends. The access is the CPU's, or the
+// the cycle's one bus access lands after the dots that fall before M2 rises, the APU
+// ticks, and the CPU samples the PPU's NMI output and the APU's IRQ output as the cycle
+// ends. The access is the CPU's, or the
 // OAM DMA unit's get or put while a transfer holds the bus.
 //
 // The whole mutable machine is one state value: state() answers it by reference,
@@ -23,6 +24,7 @@
 // it settles; a host keeping a save sets a save observer, told when the cartridge's
 // battery-backed PRG RAM has changed. Both are the host's objects, outside the state.
 
+#include "neasant/apu/apu.h"
 #include "neasant/cpu/cpu6502.h"
 #include "neasant/nes/board.h"
 #include "neasant/nes/cartridge.h"
@@ -42,7 +44,8 @@ namespace neasant {
 // How a machine is built. Every field has a default; the image is copied in, so the
 // span need not outlive the call. Construction throws std::invalid_argument, naming
 // what is supported instead, for a region other than NTSC, an alignment above 3, an
-// apuPhase above 1, and for everything makeCartridge and boardFor refuse.
+// apuPhase above 1, an audioRate above the CPU clock, and for everything makeCartridge
+// and boardFor refuse.
 struct NesConfig {
   std::span<const std::uint8_t> rom{};  // an iNES or NES 2.0 image, header included
   Region region = Region::Ntsc;         // NTSC; PAL and Dendy are refused
@@ -70,6 +73,9 @@ struct NesConfig {
   // instr_test-v5 expects LXA #imm to leave its operand in A and X, which only $FF gives
   // (its 03-immediate source: the checksum for ATX #n is TAX's).
   std::uint8_t unstableConstant = 0xFF;
+  // The rate the APU's output is decimated to, in samples a second; 0 produces no
+  // samples.
+  std::uint32_t audioRate = 48000;
   // The pattern every RAM is filled with at power-on, repeated from its start; empty
   // fills with $00. The hardware leaves RAM unreliable at power-on (NESdev wiki, "CPU
   // power up state", RAM contents) and the PPU's memories unspecified (NESdev wiki,
@@ -243,10 +249,8 @@ struct NesState {
   // Which half of the APU cycle the next machine cycle is, 0 a get and 1 a put; it
   // toggles every machine cycle (NESdev wiki, "DMA", Cadence).
   std::uint8_t apuPhase = 0;
-  // $4000-$4017 as last written, for the registers the APU holds: $4000-$4013, $4015
-  // and $4017. The bytes at $4014 and $4016 are never written: those addresses are the
-  // OAM DMA page and the controller strobe, held below.
-  std::array<std::uint8_t, 24> apuRegs{};
+  // The APU: its frame counter, its length counters, its status and its IRQ line.
+  ApuState apu{};
   PpuState ppu{};
   // The cartridge's PRG RAM and CHR RAM, each sized at construction from the header or
   // the config and never resized; the PRG RAM is the save when the cartridge has a
@@ -278,8 +282,8 @@ struct NesState {
 class Nes {
  public:
   // Builds the machine at power-on: the CPU with its reset sequence pending, every RAM
-  // holding the seed, the APU's registers zero (NESdev wiki, "CPU power up state",
-  // APU), the open bus zero, the PPU with its registers at their power-on values, its
+  // holding the seed, the APU at its power-on state (ApuState's defaults), the open bus
+  // zero, the PPU with its registers at their power-on values, its
   // vertical-blank flag as the config says, its warm-up window open and its counter at
   // the first dot (NESdev wiki, "PPU power up state"), the ports empty with their
   // registers clear, the OAM DMA unit idle, no observer set, and the master counter at
@@ -306,9 +310,9 @@ class Nes {
   // CPU's reset sequence is pending again and runs on the next cycles, keeping A, X, Y
   // and every flag but I, and a jammed core is released (NESdev wiki, "CPU power up
   // state", CPU). A transfer the OAM DMA unit has under way ends there and the CPU is
-  // released (NESdev wiki, "CPU pinout", /RST). The APU's status register goes to 0 and
-  // the DMC's direct load keeps its low bit; every other APU register keeps its byte
-  // (NESdev wiki, "CPU power up state", APU; "APU", Status). The PPU is as ppuReset
+  // released (NESdev wiki, "CPU pinout", /RST). The APU is as apuReset leaves it: every
+  // channel disabled with its counter at 0, the frame interrupt flag clear, the sequence
+  // restarting in the mode last written. The PPU is as ppuReset
   // leaves it: its counter back at the top of the picture and its warm-up window open,
   // its flag, its address and its memories kept. Work RAM, PRG RAM, CHR RAM, the open
   // bus, the strobe, the shift registers, the pads, the DMA page, the master counters
@@ -316,16 +320,19 @@ class Nes {
   void reset();
 
   // The region the machine was built for, the CPU-PPU alignment it was built with, the
-  // I/O bus decay it was built with, in master cycles, and the constant its CPU's ANE and
-  // LXA OR into the accumulator, all fixed for its life like the image.
+  // I/O bus decay it was built with, in master cycles, the constant its CPU's ANE and LXA
+  // OR into the accumulator, and the output rate it was built with, all fixed for its life
+  // like the image.
   [[nodiscard]] Region region() const noexcept { return region_; }
   [[nodiscard]] std::uint8_t alignment() const noexcept { return alignment_; }
   [[nodiscard]] std::uint32_t ppuOpenBusDecay() const noexcept { return ppuOpenBusDecay_; }
   [[nodiscard]] std::uint8_t unstableConstant() const noexcept { return cpu_.unstableConstant(); }
+  [[nodiscard]] std::uint32_t audioRate() const noexcept { return audioRate_; }
 
   // Runs one machine cycle, one CPU cycle, and returns its master cycles, twelve: the
-  // PPU runs the dots that fall inside the cycle, one bus access lands among them, and
-  // the CPU samples the PPU's NMI output as the cycle ends. The access is the CPU's;
+  // PPU runs the dots that fall inside the cycle, one bus access lands among them, the
+  // APU ticks, and the CPU samples the PPU's NMI output and the APU's IRQ output as the
+  // cycle ends. The access is the CPU's;
   // while the OAM DMA unit holds the bus it is the unit's get or put, and on the unit's
   // halt and alignment cycles the halted CPU repeats its read. A jammed core repeats
   // its idle read. A fresh machine's first seven cycles are the reset sequence. The
@@ -425,7 +432,8 @@ class Nes {
   [[nodiscard]] std::uint8_t joypadBit(std::size_t port) noexcept;
 
   // One machine cycle: the dots that fall before M2 rises, the cycle's one bus access,
-  // the dots that fall after, the NMI line, then the counters. Answers whether one of
+  // the dots that fall after, the APU's tick, the NMI and IRQ lines, then the counters.
+  // Answers whether one of
   // its dots ended a frame.
   bool machineCycle();
   // The cycle's one bus access: the OAM DMA unit's get or put while a transfer holds
@@ -449,6 +457,7 @@ class Nes {
   Region region_;
   std::uint8_t alignment_;
   std::uint32_t ppuOpenBusDecay_;
+  std::uint32_t audioRate_;
   BusObserver* observer_ = nullptr;
   SaveObserver* saveObserver_ = nullptr;
   // The save as the save observer last received it: the seed at construction, then

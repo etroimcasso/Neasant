@@ -175,7 +175,8 @@ TEST(NesObserver, EveryAccessIsToldInOrderWithItsKindAndByte) {
   // $00 to $FD; 64doc, "Immediate addressing", "Absolute addressing" and "Instructions
   // accessing the stack": the cycles of each instruction; "Open bus behavior", CPU open
   // bus: $4018 answers the last byte read; "APU", Status: bit 5 of $4015 is open bus and
-  // the rest 0. The kinds are the core's (cpu6502.h).
+  // the flags and counters, all clear here, the rest. The kinds are the core's
+  // (cpu6502.h).
   // LDA #$5A; STA $0200; INC $0200; PHA; PLA; LDA $4018; LDA $4015
   Nes m = machineWith({0xA9, 0x5A, 0x8D, 0x00, 0x02, 0xEE, 0x00, 0x02, 0x48, 0x68, 0xAD, 0x18,
                        0x40, 0xAD, 0x15, 0x40});

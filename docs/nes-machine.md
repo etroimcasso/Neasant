@@ -2,19 +2,20 @@
 
 `Nes` is the console around the 6502 core: the master clock and its budget, the bus as the
 console decodes it, the 2 KB of work RAM and the open bus, the PPU's register file and frame
-([its own page](ppu.md)), the APU's registers, the two controller ports, the OAM DMA unit on the
-CPU's RDY line, and the cartridge on its board behind the pins ([its own page](nes-cartridge.md)).
+([its own page](ppu.md)), the APU's frame counter, length counters and status register, the two
+controller ports, the OAM DMA unit on the CPU's RDY line, and the cartridge on its board behind
+the pins ([its own page](nes-cartridge.md)).
 A host builds a machine from one config value, steps it a machine cycle or a master-cycle budget
 at a time, holds the whole mutable machine as one state value, and is told about the bus and the
 save through two observers it sets.
 
 The machine runs a program's code against the console's bus, its timing and its interrupts, and
-the CPU's self-checking test programs pass on it
+the CPU's and the APU frame counter's self-checking test programs pass on it
 ([Testing against the programs](#testing-against-the-programs)). The PPU is its register file,
-its memories, its frame counter and its NMI output, with no tile fetched. The APU's registers hold
-the bytes written to them with nothing behind them, `$4015` answers its status bits as 0, and the
-DMC does not fetch. PAL and Dendy are named by `Region` and refused at construction, so every
-machine is NTSC.
+its memories, its frame counter and its NMI output, with no tile fetched. The APU is its frame
+counter, its four length counters and its status register, with the frame interrupt on the CPU's
+IRQ line ([The APU](#the-apu)); the channels make no sound and the DMC does not fetch. PAL and
+Dendy are named by `Region` and refused at construction, so every machine is NTSC.
 
 The status table in the [README](../README.md) is the component's status row. The CPU core the
 machine steps is on [the 6502 core's page](6502-cpu.md).
@@ -26,7 +27,7 @@ machine steps is on [the 6502 core's page](6502-cpu.md).
   - [What construction refuses](#what-construction-refuses)
 - [The memory map](#the-memory-map)
   - [Open bus](#open-bus)
-  - [The APU's registers](#the-apus-registers)
+  - [The APU](#the-apu)
 - [Stepping and running](#stepping-and-running)
   - [A machine cycle](#a-machine-cycle)
   - [The full surface](#the-full-surface)
@@ -93,15 +94,16 @@ neasant::Nes machine(neasant::NesConfig{.rom = image});
 // machine.region() == neasant::Region::Ntsc
 ```
 
-The region, the alignment, the I/O bus decay and the constant are the machine's fixed identity,
-read back by `region()`, `alignment()`, `ppuOpenBusDecay()` and `unstableConstant()`; everything
-else is state.
+The region, the alignment, the I/O bus decay, the constant and the output rate are the machine's
+fixed identity, read back by `region()`, `alignment()`, `ppuOpenBusDecay()`, `unstableConstant()`
+and `audioRate()`; everything else is state.
 
 ### The config value
 
 Every field has a default, so `NesConfig{.rom = image}` is a whole config. Construction throws
 `std::invalid_argument`, naming what is supported instead, for a region other than NTSC, an
-alignment above 3, an `apuPhase` above 1, and for everything the cartridge and its board refuse.
+alignment above 3, an `apuPhase` above 1, an `audioRate` above the CPU clock, and for everything
+the cartridge and its board refuse.
 
 ```cpp
 struct NesConfig {
@@ -131,6 +133,9 @@ struct NesConfig {
   // instr_test-v5 expects LXA #imm to leave its operand in A and X, which only $FF gives
   // (its 03-immediate source: the checksum for ATX #n is TAX's).
   std::uint8_t unstableConstant = 0xFF;
+  // The rate the APU's output is decimated to, in samples a second; 0 produces no
+  // samples.
+  std::uint32_t audioRate = 48000;
   // The pattern every RAM is filled with at power-on, repeated from its start; empty
   // fills with $00. The hardware leaves RAM unreliable at power-on (NESdev wiki, "CPU
   // power up state", RAM contents) and the PPU's memories unspecified (NESdev wiki,
@@ -160,6 +165,10 @@ struct NesConfig {
 - `unstableConstant` is the constant `ANE` and `LXA` OR into the accumulator: `$FF` by default,
   the 2A03's measured value, where a core built on its own holds the documents' `$EE`
   ([the CPU page](6502-cpu.md#the-unofficial-opcodes)).
+- `audioRate` is the rate the APU's output is decimated to, in samples a second, 0 for no
+  samples. The CPU clock, 236 250 000 / 132 Hz, is the most: 1 789 772 is accepted and 1 789 773
+  refused (NESdev wiki, "CPU", Frequencies). The machine holds the rate and produces no samples,
+  since the APU's channels, its mixer and its decimator are not built.
 - `ramSeed` is the pattern every RAM is filled with at power-on, repeated from its start, empty
   for all `$00`; the hardware leaves RAM unreliable (NESdev wiki, "CPU power up state", RAM
   contents; "PPU power up state").
@@ -179,6 +188,7 @@ fields are checked first, then the image, then the board:
 | `region` other than `Ntsc` | `PAL and Dendy are not built; NTSC is` |
 | `alignment` above 3 | `an alignment of 4 is not one of 0 to 3` |
 | `apuPhase` above 1 | `an apuPhase of 2 is not 0 (a get) or 1 (a put)` |
+| `audioRate` above 1 789 772 | `an audioRate of 1789773 is above the CPU clock; 1789772 is the most` |
 | an image shorter than a header | `an image of 15 bytes holds no 16-byte header` |
 | an image without the identifier | `the image carries no NES header` |
 | a header with a trainer | `a trainer is not supported` |
@@ -215,11 +225,11 @@ through one decode:
 | `$0800-$1FFF` | work RAM again, three times |
 | `$2000-$2007` | the PPU's eight ports ([the PPU page](ppu.md#the-ports)) |
 | `$2008-$3FFF` | the ports again, every eight bytes |
-| `$4000-$4013` | the APU's registers: a write is held, a read answers the open bus |
+| `$4000-$4013` | the APU's channel registers: a write sets a length counter's halt bit or loads it, and every other bit is dropped; a read answers the open bus ([The APU](#the-apu)) |
 | `$4014` | OAM DMA: a write starts a transfer; a read answers the open bus |
-| `$4015` | the APU's status: a read answers bit 5 from the open bus and 0 elsewhere; a write is held |
+| `$4015` | the APU's status: a read answers the frame interrupt flag and the length counters over bit 5 of the open bus, and clears the flag; a write sets the channels' enables |
 | `$4016` | a write is the controllers' strobe; a read is port one |
-| `$4017` | a write is held as the APU's frame counter; a read is port two |
+| `$4017` | a write is the APU's frame counter; a read is port two |
 | `$4018-$401F` | nothing on a retail console: a read answers the open bus, a write lands nowhere |
 | `$4020-$FFFF` | the cartridge's board: on NROM, PRG RAM at `$6000-$7FFF` when the cartridge has any, PRG ROM at `$8000-$FFFF`, and the open bus elsewhere ([the cartridge page](nes-cartridge.md#where-an-address-lands)) |
 
@@ -257,25 +267,63 @@ for (int cycle = 0; cycle < 7 + 4 + 3 + 4 + 3; ++cycle) machine.step();
 // machine.state().mdr == 0x5F: the last store left its byte on the bus
 ```
 
-### The APU's registers
+### The APU
 
-`state().apuRegs` holds `$4000-$4017` as last written, for the registers the APU holds:
-`$4000-$4013`, `$4015` and `$4017`. The bytes at `$4014` and `$4016` are never written there,
-since those addresses are the OAM DMA page and the controllers' strobe (NESdev wiki, "2A03", 2A03
-register map; "APU", Registers). The bytes drive nothing: a read of `$4015` answers bit 5 from
-the open bus and 0 in every other bit, where the chip reports its length counters, the DMC and
-its two interrupt flags (NESdev wiki, "APU", Status). The reset line clears `$4015` and all but
-the low bit of `$4011`, and keeps the rest ([The reset line](#the-reset-line)).
+`state().apu` is the APU as one value, `ApuState` (`neasant/apu/apu.h`): the frame counter, the
+four length counters, and the frame interrupt flag with the IRQ line it drives. The APU ticks once
+a machine cycle, after the cycle's access ([A machine cycle](#a-machine-cycle)).
+
+- **The frame counter** runs the 4-step sequence or the 5-step one by `$4017` bit 7, counting CPU
+  cycles from its origin. The half-frame clock falls at cycles 14 913 and 29 829 of the 4-step
+  sequence and 14 913 and 37 281 of the 5-step one, and the count returns to 0 at 29 830 or
+  37 282: the page's APU-cycle counts doubled, the quarter- and half-frame steps one CPU cycle on
+  (NESdev wiki, "APU Frame Counter"). A write to `$4017` restarts the sequence two cycles after a
+  write on a put cycle and three after one on a get, and in the 5-step mode the restart clocks the
+  length counters at once; until the restart the old sequence keeps stepping (NESdev wiki, "APU
+  Frame Counter", Control register; blargg's 2005 frame counter readme).
+- **The frame interrupt flag**, `$4015` bit 6, is set on the last three cycles of the 4-step
+  sequence, 29 828 to 29 830, unless `$4017` bit 6 inhibits it; the 5-step sequence never sets
+  it. A read of `$4015` clears it, and so does a write to `$4017` with bit 6 set. A read in the
+  second or third of those cycles answers the flag set and that cycle's tick sets it again
+  (NESdev wiki, "APU", Status; "APU Frame Counter").
+- **The IRQ line** is the flag with the inhibit clear, sampled at the start of each tick, so it
+  follows the flag a cycle later, and the CPU's level detector takes it at the end of that cycle
+  (NESdev wiki, "CPU interrupts", Detailed interrupt behavior). With I clear, the CPU takes the
+  interrupt at its next poll.
+- **The length counters**, one each for pulse 1, pulse 2, the triangle and the noise. A write to a
+  channel's fourth register, `$4003`, `$4007`, `$400B` or `$400F`, loads its counter from the
+  32-entry table by bits 7–3 while the channel is enabled; the half-frame clock counts each
+  counter down while it is above 0 and its halt bit is clear, bit 5 of `$4000`, `$4004` and
+  `$400C`, bit 7 of `$4008`. A write to `$4015` with a channel's enable bit clear zeroes its
+  counter and holds it there (NESdev wiki, "APU Length Counter"). A halt bit takes effect a cycle
+  late, and a load written in the cycle of a half-frame clock that counts the counter down is
+  dropped (blargg's 2005 frame counter readme, Length Halt and Length Reload).
+- **The status read** answers `$4015` as `IF-D NT21`: bit 6 the flag, bits 3–0 whether each
+  counter is above 0, bit 5 the open bus, and bits 7 and 4, the DMC's, 0 (NESdev wiki, "APU",
+  Status).
+- **Power-on and reset.** At power-on the sequence starts at the first cycle's tick, in the 4-step
+  mode with the interrupt enabled and every channel disabled: nine cycles before the first
+  instruction, the usual figure of the 9 to 12 that blargg's `apu_reset` readme measures (NESdev
+  wiki, "CPU power up state", APU). A reset disables every channel, clears the flag and restarts
+  the sequence on the next cycle in the mode last written to `$4017`
+  ([The reset line](#the-reset-line)).
+
+Every other bit written to `$4000-$4013`, the duty, envelope, sweep, timer, linear counter, noise
+and DMC fields, is dropped, and the channels make no sound. A program that loads pulse 1's counter
+and reads the status back, then runs until the sequence's flag:
 
 ```cpp
-// LDA #$C0; STA $4017; LDA $4015; STA $10
-std::vector<std::uint8_t> image =
-    nromImage({0xA9, 0xC0, 0x8D, 0x17, 0x40, 0xAD, 0x15, 0x40, 0x85, 0x10});
+// LDA #$01; STA $4015; LDA #$18; STA $4003; LDA $4015; STA $10; JMP $800F
+std::vector<std::uint8_t> image = nromImage({0xA9, 0x01, 0x8D, 0x15, 0x40, 0xA9, 0x18, 0x8D,
+                                             0x03, 0x40, 0xAD, 0x15, 0x40, 0x85, 0x10, 0x4C,
+                                             0x0F, 0x80});
 neasant::Nes machine(neasant::NesConfig{.rom = image});
-for (int cycle = 0; cycle < 7 + 2 + 4 + 4 + 3; ++cycle) machine.step();
-// machine.state().apuRegs[0x17] == 0xC0: the byte written, held
-// machine.state().ram[0x10] == 0x00: the status read answers bit 5 of the open bus, $40, and 0
-//                                    in every other bit
+for (int cycle = 0; cycle < 7 + 2 + 4 + 2 + 4 + 4 + 3; ++cycle) machine.step();
+// machine.state().apu.length[0].counter == 2: entry 3 of the length table
+// machine.state().ram[0x10] == 0x01: pulse 1's counter is above 0, over bit 5 of the open bus
+for (int cycle = 26; cycle < 29830; ++cycle) machine.step();
+// machine.state().apu.length[0].counter == 0: the half-frame clocks at cycles 14913 and 29829
+// machine.state().apu.frameInterrupt == true: set from cycle 29828
 ```
 
 ## Stepping and running
@@ -311,14 +359,15 @@ budgets.
 ### A machine cycle
 
 Inside one cycle the order is fixed: the PPU runs the dots whose master cycle falls before M2
-rises, the cycle's one bus access lands, the PPU runs the dots that fall after it, the CPU samples
-the PPU's NMI output, and the counters move. M2 is low for the first 9/24 of the cycle and high
-for the rest, four and a half master cycles in (NESdev wiki, "CPU pinout", M2), and the console
-decodes the PPU's ports while M2 is high (NESdev wiki, "Open bus behavior", Electrical basis), so
-a dot at master offset 0–4 of the cycle ticks before the access and one at 5–11 after it. The
+rises, the cycle's one bus access lands, the PPU runs the dots that fall after it, the APU ticks,
+the CPU samples the PPU's NMI output and the APU's IRQ output, and the counters move. M2 is low
+for the first 9/24 of the cycle and high for the rest, four and a half master cycles in (NESdev
+wiki, "CPU pinout", M2), and the console decodes the PPU's ports while M2 is high (NESdev wiki,
+"Open bus behavior", Electrical basis), so a dot at master offset 0–4 of the cycle ticks before
+the access and one at 5–11 after it. The
 dots fall every four master cycles from the alignment (NESdev wiki, "PPU frame timing", CPU-PPU
-Clock Alignment), and the edge detector samples the NMI line in the second half of the cycle
-(NESdev wiki, "CPU interrupts", Detailed interrupt behavior):
+Clock Alignment), and the edge and level detectors sample the NMI and IRQ lines in the second
+half of the cycle (NESdev wiki, "CPU interrupts", Detailed interrupt behavior):
 
 | `alignment` | Dots before the access, at master offsets | Dots after, at master offsets |
 |---|---|---|
@@ -330,7 +379,9 @@ Clock Alignment), and the edge detector samples the NMI line in the second half 
 (NESdev wiki, "PPU frame timing", CPU-PPU Clock Alignment; "CPU pinout", M2.) The pattern repeats
 every cycle, twelve being a multiple of four. The access is the CPU's; while the OAM DMA unit
 holds the bus it is the unit's get or put, and on the unit's halt and alignment cycles the halted
-CPU repeats its read ([OAM DMA](#oam-dma)).
+CPU repeats its read ([OAM DMA](#oam-dma)). Because the APU ticks after the access, a write to an
+APU register is seen by that cycle's tick, and a read of `$4015` answers what the previous
+cycle's tick left ([The APU](#the-apu)).
 
 ```cpp
 std::vector<std::uint8_t> image = nromImage({0x4C, 0x00, 0x80});
@@ -358,6 +409,7 @@ class Nes {
   std::uint8_t alignment() const noexcept;
   std::uint32_t ppuOpenBusDecay() const noexcept;
   std::uint8_t unstableConstant() const noexcept;
+  std::uint32_t audioRate() const noexcept;
 
   std::uint64_t step();                           // one machine cycle; returns 12
   std::uint64_t run(std::uint64_t budget);        // whole cycles to the budget; the advance
@@ -387,29 +439,27 @@ value, and everything else keeps what it held:
 | | After `reset()` |
 |---|---|
 | the CPU | the sequence pending: on the next seven cycles the program counter goes to the vector, S ends three lower and I is set; A, X, Y and the other flags keep their values; a jammed core is released; an instruction in progress is abandoned |
-| `$4015` | 0 |
-| `$4011` | its low bit kept, the rest cleared |
-| every other APU register | what it held |
+| the APU | every channel disabled with its length counter at 0, the frame interrupt flag clear, the sequence restarting on the next cycle in the mode last written to `$4017`; the inhibit bit and the halt bits kept ([The APU](#the-apu)) |
 | the OAM DMA unit | a transfer under way ends and the CPU is released; the page latch keeps its byte |
 | the PPU | `$2000`, `$2001`, the temporary address, the fine X scroll, the write toggle and the read buffer cleared; the counter at dot 0 of scanline 0 of an even frame; the warm-up window open; the vertical-blank flag, the OAM address, the current address, the I/O bus and the memories kept ([the PPU page](ppu.md#the-reset-line)) |
 | work RAM, PRG RAM, CHR RAM, the open bus, the strobe, the shift registers, the pads, the master counters, the observers | what they held |
 
 (NESdev wiki, "CPU power up state", CPU and APU; "APU", Status; "CPU pinout", /RST; "PPU power up
-state".) The master counters run on, and a budget `run()` was owed is kept. Call `reset()` between
-`step()` and `run()` calls, never from inside an observer's call.
+state"; blargg's `apu_reset` readme.) The master counters run on, and a budget `run()` was owed
+is kept. Call `reset()` between `step()` and `run()` calls, never from inside an observer's call.
 
 ```cpp
 // LDA #$55; STA $4015; LDX #$12
 std::vector<std::uint8_t> image = nromImage({0xA9, 0x55, 0x8D, 0x15, 0x40, 0xA2, 0x12});
 neasant::Nes machine(neasant::NesConfig{.rom = image});
 for (int cycle = 0; cycle < 7 + 2 + 4 + 2; ++cycle) machine.step();
-// machine.state().apuRegs[0x15] == 0x55
+// machine.state().apu.length[0].enabled == true: $55 enables pulse 1 and the triangle
 machine.reset();
 for (int cycle = 0; cycle < 7; ++cycle) machine.step();  // the sequence again
 // machine.state().cpu.pc == 0x8000
 // machine.state().cpu.a == 0x55 and .x == 0x12: kept
 // machine.state().cpu.s == 0xFA: three lower again
-// machine.state().apuRegs[0x15] == 0x00
+// machine.state().apu.length[0].enabled == false: every channel disabled
 // machine.state().master == 264: the counter runs on
 ```
 
@@ -688,7 +738,7 @@ CPU's would, in the unit's name, so a bus observer is told them with `AccessSour
 edge during a transfer is taken after the halted instruction, and `reset()` ends a transfer under
 way. `Dma::dmcRequested` and `AccessSource::DmcDma` are declared and nothing drives them: the
 DMC's fetch and its precedence over this unit (NESdev wiki, "DMA", DMC DMA during OAM DMA) are
-the APU's, which is not built.
+the DMC's, which is not built.
 
 ```cpp
 // LDA #$02; STA $4014; NOP
@@ -853,8 +903,9 @@ const std::uint64_t second = machine.run(frame);
 
 The whole mutable machine is one value, `NesState`. `state()` answers it by reference, coherent
 between calls at any cycle, mid-instruction included; `restore()` replaces it and resumes exactly
-there. The image, the region, the alignment, the decay and the constant are the machine's fixed
-identity and are not in the state, and the observers are the host's and are not in it either.
+there. The image, the region, the alignment, the decay, the constant and the output rate are the
+machine's fixed identity and are not in the state, and the observers are the host's and are not
+in it either.
 
 ```cpp
 struct NesState {
@@ -879,10 +930,8 @@ struct NesState {
   // Which half of the APU cycle the next machine cycle is, 0 a get and 1 a put; it
   // toggles every machine cycle (NESdev wiki, "DMA", Cadence).
   std::uint8_t apuPhase = 0;
-  // $4000-$4017 as last written, for the registers the APU holds: $4000-$4013, $4015
-  // and $4017. The bytes at $4014 and $4016 are never written: those addresses are the
-  // OAM DMA page and the controller strobe, held below.
-  std::array<std::uint8_t, 24> apuRegs{};
+  // The APU: its frame counter, its length counters, its status and its IRQ line.
+  ApuState apu{};
   PpuState ppu{};
   // The cartridge's PRG RAM and CHR RAM, each sized at construction from the header or
   // the config and never resized; the PRG RAM is the save when the cartridge has a
@@ -989,19 +1038,24 @@ for (int n = 0; n < 3; ++n) {
 The machine runs the CPU's self-checking test programs, blargg's eight suites as the
 `christopherpow/nes-test-roms` repository collects them: `instr_test-v5`, `instr_timing`,
 `instr_misc`, `cpu_dummy_reads`, `cpu_dummy_writes`, `cpu_exec_space`, `cpu_reset` and
-`branch_timing_tests`, 36 ROM files. Each is booted on a machine built with the config's defaults
-and run one frame at a time until it reports. The newer programs report a status byte at `$6000`
-with a signature at `$6001-$6003` and their text from `$6004`, read out of `state().prgRam`; the
-two older suites, `cpu_dummy_reads` and `branch_timing_tests`, print their result on the screen,
-read out of `state().ppu.ciram`. A program that asks for the reset button gets the reset line
-seven frames later.
+`branch_timing_tests`, 36 ROM files. It runs the APU frame counter's programs from the same
+repository: `apu_test` 1–6, `apu_reset`, `blargg_apu_2005.07.30` and `cpu_interrupts_v2`, 30 ROM
+files. Each is booted on a machine built with the config's defaults and run one frame at a time
+until it reports. The newer programs report a status byte at `$6000` with a signature at
+`$6001-$6003` and their text from `$6004`, read out of `state().prgRam`; the older ones,
+`cpu_dummy_reads`, `branch_timing_tests` and the 2005 APU set, print their result on the screen,
+read out of `state().ppu.ciram`, the 2005 set as a result code, `$01` a pass. A program that asks
+for the reset button gets the reset line seven frames later.
 
-29 of the 36 pass. The other seven register and skip, naming what they need: the APU's length
-counter (`1-instr_timing`, `2-branch_timing`), its frame interrupt flag (`04-dummy_reads_apu`),
-and mapper 1 (the four multi-test builds, whose sub-tests run from the singles).
-`cpu_dummy_reads` names mapper 3 with one bank and runs as NROM under the config's mapper
-override. `test_cpu_exec_space_apu` passes with the cartridge range from `$4020` floating as NROM
-leaves it.
+Of the CPU's 36, 32 pass and four, the multi-test builds on mapper 1 whose sub-tests run from the
+singles, register and skip naming the mapper. `cpu_dummy_reads` names mapper 3 with one bank and
+runs as NROM under the config's mapper override. `test_cpu_exec_space_apu` passes with the
+cartridge range from `$4020` floating as NROM leaves it. Of the APU's 30, 27 pass; `apu_test.nes`
+and `cpu_interrupts.nes`, the multi-test builds on mapper 1, skip naming the mapper, and
+`works_immediately` skips naming the DMC's two status bits, which it reads. `2-nmi_and_brk`,
+whose readme says it "occasionally fails on NES due to PPU-CPU synchronization", passes under
+alignment 0, the default, and fails under 1, 2 and 3. Every APU program passes under either
+`apuPhase`.
 
 The repository is reference data and is not vendored. Point the build at a local clone:
 
@@ -1011,8 +1065,8 @@ cmake --build build
 ctest --test-dir build
 ```
 
-Without that path the 36 program cases register and skip, naming the option, and the case on the
-constant runs regardless; with the path and a file absent, the case skips naming the file.
+Without that path every program case registers and skips, naming the option, and the hand cases
+run regardless; with the path and a file absent, the case skips naming the file.
 `NEASANT_REQUIRE_NES_TEST_ROMS=1` turns either skip into a failure, so an environment that means
 to run the programs cannot report green without them.
 
@@ -1029,7 +1083,13 @@ The hand-derived suites, by executable:
   bus, and OAM DMA at 513 and 514 cycles.
 - `nes_observers_test` — every access told with its kind, byte and source, the save report per
   frame and per restore, and two machines equal every frame and access by access.
-- `nes_blargg_cpu_test` — the programs above, and the constant the machine builds its CPU with.
+- `nes_blargg_cpu_test` — the CPU's programs above, and the constant the machine builds its CPU
+  with.
+- `apu_frame_test` — the frame counter's two sequences from a write on either APU half, the
+  flag's three cycles and the status read against them, the IRQ line a cycle behind the flag,
+  the restart with its delay, the length table, the halt bit a cycle late, the load against a
+  clock, the enable bits, power-on and reset, driven through `apu.h` and on the machine; and the
+  APU's programs above.
 
 Every value they assert is read from a document named under [Sources](#sources).
 
@@ -1043,8 +1103,12 @@ Every value they assert is read from a document named under [Sources](#sources).
   resumes on that cycle.
 - **An undriven read answers the last byte on the bus.** `$4000-$4014`, `$4018-$401F` and an
   address the board leaves alone answer the operand's high byte on an absolute read.
-- **The APU is its registers.** `$4000-$4013`, `$4015` and `$4017` hold their bytes; a read of
-  `$4015` answers 0 but for bit 5; nothing sounds and no APU interrupt fires.
+- **The frame interrupt is on from power-on.** The 4-step sequence sets the flag 29 828 cycles
+  after its origin and every 29 830 after that, and the flag holds the IRQ line low until `$4015`
+  is read or `$4017` is written with bit 6 set; a program that clears I without doing either is
+  interrupted.
+- **The APU makes no sound.** `$4015` reports the length counters and the frame interrupt flag; the
+  channels' other bits are dropped.
 - **Set the pad before the frame that reads it.** A pad changed after the strobe's fall is seen
   when the register next fills.
 - **An empty port and a pad with nothing pressed differ.** 0 on every read, against 0 eight times
@@ -1065,9 +1129,11 @@ Every value they assert is read from a document named under [Sources](#sources).
 What the code does at each point below is fixed and tested; what the hardware does is not settled
 by the documents the machine is built from.
 
-1. **The APU's registers across a reset.** The "CPU power up state" page's after-reset column
-   marks the pulse, triangle and noise registers "unchanged?"; the machine keeps every byte but
-   `$4015`'s and the high bits of `$4011`, as the column's other cells say.
+1. **The APU across a reset.** The "CPU power up state" page's after-reset column marks the
+   channel registers "unchanged?", and blargg's `apu_reset` readme says the IRQ inhibit flag "is
+   sometimes cleared"; the machine keeps the halt bits, the mode and the inhibit. Power-on and
+   reset start the sequence nine cycles before the first instruction, where the readme measures
+   9 to 12.
 2. **PAL and Dendy.** The "CPU" page gives their master clock; no page the machine is built from
    gives their frame, so `consoleClock` answers a frame of 0 for both and `FrameDeadline` owes
    every frame at 0. Construction refuses both regions.
@@ -1093,7 +1159,7 @@ by the documents the machine is built from.
    for either. The config states `$FF` for both.
 9. **The DMC.** `AccessSource::DmcDma` and `Dma::dmcRequested` are declared and nothing drives
    them: the DMC's fetch, its precedence over OAM DMA ("DMA", DMC DMA during OAM DMA) and the
-   double clock it gives a pad ("Controller reading", DPCM conflict) are the APU's, which is not
+   double clock it gives a pad ("Controller reading", DPCM conflict) are the DMC's, which is not
    built.
 
 ## See also
@@ -1109,20 +1175,27 @@ by the documents the machine is built from.
 - `include/neasant/nes/nes.h` — the config value, the state value, the pads, the observers and
   `Nes`.
 - `include/neasant/nes/clock.h` — `Region`, `ConsoleClock` and `FrameDeadline`.
+- `include/neasant/apu/apu.h` — `ApuState`, its length counters, and the functions the machine
+  calls: the write, the status read, the tick, the IRQ output and the reset.
 - `src/nes/nes.cpp` — the button names, construction, the decode, the bus with open bus, the
   controller ports' clock lines, the OAM DMA unit, the machine cycle, `step` and `run`, `reset`
   and `restore`.
+- `src/apu/apu.cpp` — the length table, the frame counter's steps, the restart and the
+  half-frame clock.
 - `tests/nes/` — the five hand-derived suites, the authored-image helper, and the test-ROM
-  harness with its suite.
+  harness with its suite; `tests/apu/` — the APU's suite.
 
 ## Sources
 
 - **NESdev wiki** — the pages "CPU memory map", "2A03", "Open bus behavior", "CPU", "CPU power up
-  state", "CPU pinout", "CPU interrupts", "DMA", "APU", "Controller reading", "Standard
-  controller", "PPU frame timing" and "PPU power up state", at `https://www.nesdev.org/wiki/`.
+  state", "CPU pinout", "CPU interrupts", "DMA", "APU", "APU Frame Counter", "APU Length
+  Counter", "Controller reading", "Standard controller", "PPU frame timing" and "PPU power up
+  state", at `https://www.nesdev.org/wiki/`.
 - **2A03 technical reference** — Brad Taylor, *2A03 technical reference* (2004).
 - **64doc** and **No More Secrets** — as the [CPU page](6502-cpu.md#sources) names them, for the
   constant `ANE` and `LXA` OR into A.
-- **The test programs** — blargg's CPU suites as the `christopherpow/nes-test-roms` repository at
+- **The test programs** — blargg's CPU suites and his APU, reset, frame-counter and interrupt
+  programs as the `christopherpow/nes-test-roms` repository at
   `https://github.com/christopherpow/nes-test-roms` collects them, with their readmes and sources;
-  the reference data the program suite runs.
+  the reference data the program suites run. The 2005 set's readme, "blargg's 2005 frame counter
+  readme" above, and `apu_reset`'s readme are published measurements of the console.

@@ -108,7 +108,8 @@ Nes::Nes(NesConfig config)
     : cpu_(powerOn(), config.unstableConstant),
       region_(config.region),
       alignment_(config.alignment),
-      ppuOpenBusDecay_(config.ppuOpenBusDecay) {
+      ppuOpenBusDecay_(config.ppuOpenBusDecay),
+      audioRate_(config.audioRate) {
   if (config.region != Region::Ntsc) {
     throw std::invalid_argument("PAL and Dendy are not built; NTSC is");
   }
@@ -121,6 +122,12 @@ Nes::Nes(NesConfig config)
     throw std::invalid_argument("an apuPhase of " +
                                 std::to_string(static_cast<unsigned>(config.apuPhase)) +
                                 " is not 0 (a get) or 1 (a put)");
+  }
+  // NESdev wiki, "CPU", Frequencies: the CPU clock is the master clock divided by twelve,
+  // 236 250 000 / 132 Hz, and the decimator cannot produce more samples than cycles.
+  if (static_cast<std::uint64_t>(config.audioRate) * 132 > 236250000) {
+    throw std::invalid_argument("an audioRate of " + std::to_string(config.audioRate) +
+                                " is above the CPU clock; 1789772 is the most");
   }
   cartridge_ = makeCartridge(config.rom, CartridgeOverrides{.mapper = config.mapper,
                                                              .mirroring = config.mirroring,
@@ -176,11 +183,9 @@ void Nes::restore(const NesState& state) {
 
 void Nes::reset() {
   cpu_.reset();
-  // NESdev wiki, "CPU power up state", APU, the after-reset column; "APU", Status: a
-  // reset has the effect of writing $00 to $4015, and the DMC's direct load keeps its
-  // low bit. Every other register keeps its byte.
-  state_.apuRegs[0x15] = 0;
-  state_.apuRegs[0x11] = static_cast<std::uint8_t>(state_.apuRegs[0x11] & 0x01u);
+  // NESdev wiki, "CPU power up state", APU, the after-reset column; blargg's apu_reset
+  // programs: the last value written to $4017 is written again.
+  apuReset(state_.apu);
   // NESdev wiki, "CPU pinout", /RST: the line holds the CPU in reset with its pins
   // released, and the CPU starts at the reset vector when it is let go, so a transfer
   // under way ends here and the halted read is not resumed; the page latch keeps its
@@ -320,11 +325,10 @@ std::uint8_t Nes::busRead(std::uint16_t address, CycleKind kind, AccessSource so
       break;
     }
     case Target::ApuStatus:
-      // NESdev wiki, "APU", Status: bit 5 is open bus, and the other bits report
-      // counters and flags this machine does not hold; the external data bus is
-      // disconnected for the read, so the open bus keeps the value of the last cycle
-      // that did not read $4015.
-      value = static_cast<std::uint8_t>(state_.mdr & 0x20u);
+      // NESdev wiki, "APU", Status: the flags and the counters over bit 5 of the open bus;
+      // the external data bus is disconnected for the read, so the open bus keeps the
+      // value of the last cycle that did not read $4015.
+      value = apuReadStatus(state_.apu, state_.mdr);
       leavesBus = true;
       break;
     case Target::JoypadOne:
@@ -374,9 +378,9 @@ void Nes::busWrite(std::uint16_t address, std::uint8_t value, CycleKind kind,
     case Target::Apu:
     case Target::ApuStatus:
     case Target::JoypadTwo:
-      // The APU's registers are held as the bytes written to them (NESdev wiki, "2A03",
-      // 2A03 register map; "APU", Registers).
-      state_.apuRegs[address & 0x001Fu] = value;
+      // The APU takes the write in the half of the APU cycle it lands in (apu.h); $4017's
+      // write is the frame counter's.
+      apuWrite(state_.apu, address, value, state_.apuPhase);
       break;
     case Target::OamDma:
       // NESdev wiki, "DMA", OAM DMA: a transfer copies from the page most recently
@@ -464,9 +468,10 @@ void Nes::busCycle() {
 bool Nes::machineCycle() {
   // The dots whose master cycle falls before M2 rises, then the cycle's one access,
   // then the dots that fall after it, which a read of $2002 under way is told (NESdev
-  // wiki, "PPU frame timing", VBL Flag Timing), then the NMI output as the CPU samples
-  // it at the cycle's end (NESdev wiki, "CPU interrupts", Detailed interrupt behavior:
-  // the edge detector polls the line during the second half of each cycle).
+  // wiki, "PPU frame timing", VBL Flag Timing), then the APU's tick, then the two lines as
+  // the CPU samples them at the cycle's end (NESdev wiki, "CPU interrupts", Detailed
+  // interrupt behavior: the edge and level detectors sample during the second half of
+  // each cycle).
   const std::uint64_t access = state_.master + kMasterCyclesToM2Rise;
   const std::uint64_t end = state_.master + kMasterCyclesPerCpuCycle;
   bool frameEnded = false;
@@ -480,7 +485,9 @@ bool Nes::machineCycle() {
     if (ppuTickDot(state_.ppu, statusRead_)) frameEnded = true;
     state_.dotClock += kMasterCyclesPerDot;
   }
+  apuTickCycle(state_.apu);
   cpu_.setNmiLine(ppuNmiAsserted(state_.ppu));
+  cpu_.setIrqLine(apuIrqAsserted(state_.apu));
   state_.master = end;
   state_.apuPhase = static_cast<std::uint8_t>(state_.apuPhase ^ 1u);
   state_.cpu = cpu_.state();

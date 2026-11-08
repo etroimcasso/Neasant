@@ -110,3 +110,15 @@ neasant_add_test(nes_observers_test nes/observers_test.cpp)
 neasant_add_test(nes_blargg_cpu_test nes/blargg_cpu_test.cpp nes/rom_harness.cpp)
 target_compile_definitions(nes_blargg_cpu_test PRIVATE
   NEASANT_NES_TEST_ROMS="${NEASANT_NES_TEST_ROMS}")
+
+# The APU's frame counter, length counters and status: the two sequences' steps from a
+# write on either APU half, the flag's three ticks and the status read against them, the
+# IRQ line one cycle behind the flag, the restart with its delay and its immediate clocks,
+# the length table, the halt bit a tick late, the reload against a clock, the enable bits,
+# power-on and reset; and blargg's APU, reset, frame-counter and interrupt programs run on
+# the machine, read out of the state value. The harness and the authored-image helpers are
+# the machine tests'.
+neasant_add_test(apu_frame_test apu/frame_test.cpp nes/rom_harness.cpp)
+target_include_directories(apu_frame_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
+target_compile_definitions(apu_frame_test PRIVATE
+  NEASANT_NES_TEST_ROMS="${NEASANT_NES_TEST_ROMS}")

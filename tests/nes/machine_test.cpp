@@ -26,6 +26,7 @@
 
 namespace {
 
+using neasant::ApuState;
 using neasant::consoleClock;
 using neasant::Cpu6502State;
 using neasant::FrameDeadline;
@@ -133,8 +134,7 @@ TEST(NesBuild, PowerOnIsTheDocumentedState) {
   EXPECT_EQ(s.consumed, 0u);
   EXPECT_EQ(s.dotClock, 3u);
   EXPECT_EQ(s.apuPhase, 1);
-  EXPECT_TRUE(std::all_of(s.apuRegs.begin(), s.apuRegs.end(),
-                          [](std::uint8_t byte) { return byte == 0; }));
+  EXPECT_TRUE(s.apu == ApuState{});
   EXPECT_EQ(s.ppu.ioLatch, 0);
   EXPECT_EQ(s.ppu.dot, 0);
   EXPECT_EQ(s.ppu.scanline, 0);
@@ -469,10 +469,10 @@ TEST(NesBus, TheApuStatusReadLeavesTheBusAlone) {
   EXPECT_EQ(m.state().ppu.ioLatch, 0xFF);
 }
 
-TEST(NesBus, TheApuRegistersHoldTheirBytes) {
-  // NESdev wiki, "2A03", 2A03 register map; "APU", Registers; "DMA", OAM DMA; "Controller
-  // reading", $4016 Write. The write to $4014 starts a transfer that holds the CPU for
-  // 513 cycles before the next instruction's opcode fetch.
+TEST(NesBus, TheApuTakesItsBitsAndTheDmaUnitAndStrobeTheirs) {
+  // NESdev wiki, "APU", Status and Frame Counter; "APU Length Counter"; "DMA", OAM DMA;
+  // "Controller reading", $4016 Write. The write to $4014 starts a transfer that holds the
+  // CPU for 513 cycles before the next instruction's opcode fetch.
   // LDA #$C0; STA $4017; LDA #$0F; STA $4015; LDA #$02; STA $4014; LDA #$01; STA $4016;
   // LDA #$7F; STA $4011; STA $4000
   Nes m = machineWith({0xA9, 0xC0, 0x8D, 0x17, 0x40, 0xA9, 0x0F, 0x8D, 0x15, 0x40, 0xA9, 0x02,
@@ -480,12 +480,10 @@ TEST(NesBus, TheApuRegistersHoldTheirBytes) {
                        0x40, 0x8D, 0x00, 0x40});
   stepCycles(m, 554);
   const NesState& s = m.state();
-  EXPECT_EQ(s.apuRegs[0x17], 0xC0);
-  EXPECT_EQ(s.apuRegs[0x15], 0x0F);
-  EXPECT_EQ(s.apuRegs[0x11], 0x7F);
-  EXPECT_EQ(s.apuRegs[0x00], 0x7F);
-  EXPECT_EQ(s.apuRegs[0x14], 0);
-  EXPECT_EQ(s.apuRegs[0x16], 0);
+  EXPECT_TRUE(s.apu.fiveStep);
+  EXPECT_TRUE(s.apu.inhibit);
+  for (const auto& length : s.apu.length) EXPECT_TRUE(length.enabled);
+  EXPECT_TRUE(s.apu.length[0].halt);  // $7F has bit 5 set
   EXPECT_EQ(s.dma.page, 2);
   EXPECT_TRUE(s.strobe);
 }
@@ -509,7 +507,7 @@ TEST(NesBus, TheControllerPortsAnswerOpenBusAboveFiveZeroLines) {
 // ---- NesReset ----
 
 TEST(NesReset, ResetKeepsWhatItKeeps) {
-  // NESdev wiki, "CPU power up state", CPU and APU; "APU", Status.
+  // NESdev wiki, "CPU power up state", CPU and APU; "APU", Status; "APU Length Counter".
   // LDA #$55; STA $0000; LDA #$0F; STA $4015; LDA #$C0; STA $4017; LDA #$7F; STA $4011;
   // STA $4000; STA $2000; STA $4016; LDX #$12; LDY #$34
   Nes m = machineWith({0xA9, 0x55, 0x8D, 0x00, 0x00, 0xA9, 0x0F, 0x8D, 0x15, 0x40, 0xA9, 0xC0,
@@ -528,10 +526,13 @@ TEST(NesReset, ResetKeepsWhatItKeeps) {
   EXPECT_EQ(s.cpu.x, 0x12);
   EXPECT_EQ(s.cpu.y, 0x34);
   EXPECT_NE(s.cpu.p & kCpuFlagI, 0);
-  EXPECT_EQ(s.apuRegs[0x15], 0);
-  EXPECT_EQ(s.apuRegs[0x17], 0xC0);
-  EXPECT_EQ(s.apuRegs[0x11], 0x01);
-  EXPECT_EQ(s.apuRegs[0x00], 0x7F);
+  for (const auto& length : s.apu.length) {
+    EXPECT_FALSE(length.enabled);
+    EXPECT_EQ(length.counter, 0);
+  }
+  EXPECT_TRUE(s.apu.fiveStep);
+  EXPECT_TRUE(s.apu.inhibit);
+  EXPECT_TRUE(s.apu.length[0].halt);
   EXPECT_EQ(s.ram[0], 0x55);
   EXPECT_EQ(s.ppu.ioLatch, 0x7F);
   EXPECT_TRUE(s.strobe);

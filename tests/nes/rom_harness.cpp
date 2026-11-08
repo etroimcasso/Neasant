@@ -3,6 +3,7 @@
 #include "neasant/nes/clock.h"
 
 #include <array>
+#include <cctype>
 #include <cstddef>
 #include <fstream>
 #include <iterator>
@@ -51,6 +52,20 @@ bool containsAny(const std::string& text, std::span<const char* const> words) {
     if (text.find(word) != std::string::npos) return true;
   }
   return false;
+}
+
+// The 2005 APU set prints its result as a dollar sign and two hexadecimal digits, after
+// any bytes a failing test prints first (its tests.txt: "A result code of 1 always
+// indicates that all tests were passed"); the last such token is the code.
+std::optional<std::string> lastResultCode(const std::string& text) {
+  std::optional<std::string> code;
+  for (std::size_t i = 0; i + 2 < text.size(); ++i) {
+    if (text[i] == '$' && std::isxdigit(static_cast<unsigned char>(text[i + 1])) != 0 &&
+        std::isxdigit(static_cast<unsigned char>(text[i + 2])) != 0) {
+      code = text.substr(i + 1, 2);
+    }
+  }
+  return code;
 }
 
 }  // namespace
@@ -104,6 +119,11 @@ RomResult runUntilResult(Nes& machine, Report report, std::uint64_t guardFrames)
       }
       if (containsAny(result.text, kFailWords)) {
         result.reported = true;
+        return result;
+      }
+      if (const std::optional<std::string> code = lastResultCode(result.text)) {
+        result.reported = true;
+        result.passed = *code == "01";
         return result;
       }
       continue;
