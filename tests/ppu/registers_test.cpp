@@ -400,8 +400,8 @@ TEST(PpuPorts, PaletteWritesLandInTheirAliases) {
 }
 
 TEST(PpuPorts, TheBusDecaysBitByBitAfterTheCount) {
-  // NESdev forum, "Tests for ACE speedruns that rely on PPU's internal open bus"; NESdev
-  // wiki, "Open bus behavior", PPU open bus: a read of $2002 drives bits 7-5 alone.
+  // NESdev wiki, "PPU registers", MMIO registers; "Open bus behavior", PPU open bus: a
+  // read of $2002 drives bits 7-5 alone.
   Chip chip;
   chip.inputs.busDecayDots = 10;
   const auto tick = [&chip](int dots) {
@@ -699,10 +699,9 @@ TEST(PpuFrame, TheWarmUpEndsAtTheFirstPreRenderLine) {
 }
 
 TEST(PpuFrame, TheMachineDecaysTheBusAfterTheConfiguredMasterCycles) {
-  // NESdev forum, "Tests for ACE speedruns that rely on PPU's internal open bus". The
-  // write lands in cycle 12 after the dots at master 144 and 148; 480 master cycles are
-  // 120 dots, the 120th of which is the dot at master 628, in cycle 52, whose last dot
-  // at 632 is the 121st.
+  // NESdev wiki, "PPU registers", MMIO registers. The write lands in cycle 12 after the
+  // dots at master 144 and 148; 480 master cycles are 120 dots, the 120th of which is the
+  // dot at master 628, in cycle 52, whose last dot at 632 is the 121st.
   const Bytes image = imageWith(kDriveBusOnce);
   Nes m(NesConfig{.rom = image, .ppuOpenBusDecay = 480});
   EXPECT_EQ(m.ppuOpenBusDecay(), 480u);

@@ -186,10 +186,10 @@ struct PpuState {
   // For each bit of the I/O bus, bit 0 first, the dots left before it decays to zero:
   // reloaded by every access that drives the bit, from the count the machine was built
   // with, and 0 once the bit has decayed or when it has never been driven. A read of a
-  // write-only port drives nothing and reloads nothing. A set bit decays to zero
-  // (NESdev forum, "Tests for ACE speedruns that rely on PPU's internal open bus": the
-  // thread's ppudecay test ROM leaves a byte on the bus and counts until it changes;
-  // a single set bit holds longest and a byte of set bits changes first).
+  // write-only port drives nothing and reloads nothing. A set bit decays to zero (NESdev
+  // wiki, "PPU registers", MMIO registers: the bus is a dynamic latch, and at least one
+  // bit of it decays after 3 to 30 ms; the ppudecay test program writes a byte to $2002
+  // and counts until a read of $2000 answers another).
   std::array<std::uint32_t, 8> ioLatchDecay{};
   // The warm-up window: while it stands, writes to $2000, $2001, $2005 and $2006 have
   // no effect and the read buffer is held at zero. It opens at power-on and at reset
@@ -396,12 +396,12 @@ Each bit of the bus is a dynamic latch: an access that drives it recharges it fo
 machine was built with, in dots, and it decays to zero when the count runs out. A read of a
 write-only port drives nothing and recharges nothing. The count is `NesConfig::ppuOpenBusDecay`
 in master cycles, four to a dot, 0 holding the bus for ever. The default, 460 800 master cycles,
-is one reading of an NTSC NES at power-on: a test ROM writes a value to `$2002` and polls `$2000`
-every fifteen CPU cycles until the byte changes, counting `$A00` polls, 38 400 CPU cycles, about
-21 ms. The readings run from 4 to 24 ms across consoles and shorten as a console warms. A byte of
-set bits changes first and a single set bit holds longest, which is why the chip ages each bit on
-its own and clears set bits to zero (NESdev forum, "Tests for ACE speedruns that rely on PPU's
-internal open bus"; NESdev wiki, "PPU registers", MMIO registers).
+is the result lidnariq's `ppudecay` test program reports on its author's NTSC NES at power-on:
+the program writes a value to `$2002` and polls `$2000` every fifteen CPU cycles until the byte
+changes, counting `$A00` polls, 38 400 CPU cycles, about 21 ms (its source and its author's
+description). The bus is a dynamic latch, and at least one bit of it decays after 3 to 30 ms,
+sooner as the PPU warms (NESdev wiki, "PPU registers", MMIO registers), so the chip ages each bit
+on its own; a decayed bit reads 0.
 
 ```cpp
 const neasant::PpuInputs quick{board, cartridge, chrRam, 10u};  // ten dots
@@ -740,9 +740,11 @@ by the documents the chip is built from.
 7. **The warm power-on.** The page's values for a console off under twenty seconds — PPUSTATUS
    `$80`, OAMADDR `$2F` or `$01`, PPUADDR `$0001` — are not modelled; a host that wants them
    writes the state.
-8. **The I/O bus's decay.** The thread's readings run from 4 to 24 ms across consoles and bits and
-   shorten as a console warms; the config holds one count for every bit, the thread author's NTSC
-   NES at power-on.
+8. **The I/O bus's decay.** The "PPU registers" page gives 3 to 30 ms, sooner as the PPU warms,
+   and the `ppudecay` program's author reports his NTSC NES from about 21 ms at power-on to 19 ms
+   warm; the config holds one count for every bit, his power-on figure. No document the chip is
+   built from says which value a decayed bit takes or how the time differs from bit to bit; the
+   chip clears a decayed bit to 0 and ages every bit by the same count.
 9. **The palette read's revision.** The "PPU registers" page's immediate palette read is the
    2C02G's and later; earlier revisions answered the read buffer. The chip is the 2C02G's and the
    earlier answer is not selectable.
@@ -768,6 +770,6 @@ by the documents the chip is built from.
 - **NESdev wiki** — the pages "PPU registers", "PPU scrolling", "PPU memory map", "PPU palettes",
   "PPU frame timing", "PPU power up state", "NMI", "Open bus behavior", "Cartridge connector",
   "CPU pinout", "CPU interrupts" and "DMA", at `https://www.nesdev.org/wiki/`.
-- **NESdev forum** — the thread "Tests for ACE speedruns that rely on PPU's internal open bus" at
-  `https://forums.nesdev.org/viewtopic.php?t=24639`, with its test ROM and source, read as the
-  measurement of the I/O bus's decay.
+- **The `ppudecay` test program** — lidnariq's, public domain (2023), with its source and its
+  author's description of what it measures and what it reports on his console, published at
+  `https://forums.nesdev.org/viewtopic.php?t=24639`.

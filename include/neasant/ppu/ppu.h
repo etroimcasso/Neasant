@@ -63,10 +63,10 @@ struct PpuState {
   // For each bit of the I/O bus, bit 0 first, the dots left before it decays to zero:
   // reloaded by every access that drives the bit, from the count the machine was built
   // with, and 0 once the bit has decayed or when it has never been driven. A read of a
-  // write-only port drives nothing and reloads nothing. A set bit decays to zero
-  // (NESdev forum, "Tests for ACE speedruns that rely on PPU's internal open bus": the
-  // thread's ppudecay test ROM leaves a byte on the bus and counts until it changes;
-  // a single set bit holds longest and a byte of set bits changes first).
+  // write-only port drives nothing and reloads nothing. A set bit decays to zero (NESdev
+  // wiki, "PPU registers", MMIO registers: the bus is a dynamic latch, and at least one
+  // bit of it decays after 3 to 30 ms; the ppudecay test program writes a byte to $2002
+  // and counts until a read of $2000 answers another).
   std::array<std::uint32_t, 8> ioLatchDecay{};
   // The warm-up window: while it stands, writes to $2000, $2001, $2005 and $2006 have
   // no effect and the read buffer is held at zero. It opens at power-on and at reset

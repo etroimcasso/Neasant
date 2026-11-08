@@ -122,10 +122,11 @@ struct NesConfig {
   // state", Initial Register Values and the note on the VBL flag).
   bool vblankAtPowerOn = true;
   // Master cycles a bit of the PPU's I/O bus keeps the value an access drove onto it
-  // before it decays to zero; 0 keeps it for ever. The hardware's time varies with the
-  // chip and its warmth (NESdev forum, "Tests for ACE speedruns that rely on PPU's
-  // internal open bus"); the default is the thread's reading for an NTSC NES at
-  // power-on, $A00 counts of 15 CPU cycles, 38 400 CPU cycles.
+  // before it decays to zero; 0 keeps it for ever. The hardware's time is 3 to 30 ms,
+  // shorter as the PPU warms (NESdev wiki, "PPU registers", MMIO registers); the default
+  // is the result lidnariq's ppudecay test program reports on its author's NTSC NES at
+  // power-on, $A00 counts of 15 CPU cycles, 38 400 CPU cycles (its source and its
+  // author's description).
   std::uint32_t ppuOpenBusDecay = 460800;
   // The constant the CPU's ANE and LXA OR into the accumulator, which the hardware leaves
   // to the chip and its conditions (64doc, "6510/8502 Undocumented Commands"; No More
