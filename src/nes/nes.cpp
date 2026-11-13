@@ -485,7 +485,7 @@ bool Nes::machineCycle() {
     if (ppuTickDot(state_.ppu, statusRead_)) frameEnded = true;
     state_.dotClock += kMasterCyclesPerDot;
   }
-  apuTickCycle(state_.apu);
+  apuTickCycle(state_.apu, state_.apuPhase);
   cpu_.setNmiLine(ppuNmiAsserted(state_.ppu));
   cpu_.setIrqLine(apuIrqAsserted(state_.apu));
   state_.master = end;

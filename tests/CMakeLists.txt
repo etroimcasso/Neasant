@@ -122,3 +122,14 @@ neasant_add_test(apu_frame_test apu/frame_test.cpp nes/rom_harness.cpp)
 target_include_directories(apu_frame_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
 target_compile_definitions(apu_frame_test PRIVATE
   NEASANT_NES_TEST_ROMS="${NEASANT_NES_TEST_ROMS}")
+
+# The APU's pulse, triangle and noise channels: the pulses' timers on the get half, the four
+# duty waveforms, the sequencer's restart and the period floor; the envelopes' start, divider,
+# loop and constant volume; the sweeps' two negates, their divider and reload, the target
+# that silences and the period it leaves; the quarter- and half-frame clocks on those units
+# in both sequences; the triangle's 32 steps, its linear counter and the counters that stop
+# it; the noise's shift register in both modes, its period table and its output; reset and
+# the enables; and two programs on the machine. The authored-image helpers are the machine
+# tests'.
+neasant_add_test(apu_channels_test apu/channels_test.cpp)
+target_include_directories(apu_channels_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)

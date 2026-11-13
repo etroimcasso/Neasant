@@ -57,9 +57,10 @@ using Program = std::initializer_list<std::uint8_t>;
 constexpr std::uint8_t kGet = 0;
 constexpr std::uint8_t kPut = 1;
 
-// Ticks the chip `n` times.
+// Ticks the chip `n` times, each as a get cycle: the half a tick is given moves the
+// pulses' and the noise's timers alone, which these cases do not read.
 void tickN(ApuState& state, long n) {
-  for (long i = 0; i < n; ++i) apuTickCycle(state);
+  for (long i = 0; i < n; ++i) apuTickCycle(state, kGet);
 }
 
 // The power-on chip with pulse 1 enabled and its counter loaded from table entry
@@ -69,7 +70,7 @@ ApuState pulseLoaded(std::uint8_t value) {
   ApuState state;
   apuWrite(state, 0x4015, 0x01, kGet);
   apuWrite(state, 0x4003, value, kGet);
-  apuTickCycle(state);
+  apuTickCycle(state, kGet);
   return state;
 }
 
@@ -242,18 +243,19 @@ TEST(FrameCounter, TheFlagIsSetOnThreeTicksAndAReadInTheirCyclesClearsOnlyThatTi
   EXPECT_EQ(apuReadStatus(s, 0) & 0x40, 0x00);
 }
 
-TEST(FrameCounter, FiveStepFromAWriteOnAPutClocksAtTheRestartAndNeverSetsTheFlag) {
+TEST(FrameCounter, FiveStepFromAWriteOnAPutClocksTheCycleBeforeItsRestartAndNeverSetsTheFlag) {
   // NESdev wiki, "APU Frame Counter", the $4017.7 = 1 table and Control register: the
-  // half-frame clocks at 7456.5 and 18640.5 APU cycles, both units clocked at the
-  // restart, the flag never set; blargg's 2005 readme, Mode 1 Timing: length at 1, 14915
-  // and 37283, the next pass 37282 on.
+  // half-frame clocks at 7456.5 and 18640.5 APU cycles, both units clocked the cycle
+  // before the restart, two cycles after the write ("APU", Frame Counter), the flag never
+  // set; blargg's 2005 readme, Mode 1 Timing: length at 1, 14915 and 37283, the next pass
+  // 37282 on.
   ApuState s = pulseLoaded(0x08);
   apuWrite(s, 0x4017, 0x80, kPut);
-  tickN(s, 2);  // ticks 0 and 1
+  tickN(s, 1);  // tick 0
   EXPECT_EQ(s.length[0].counter, 254);
-  tickN(s, 1);  // 2, the restart
+  tickN(s, 1);  // 1, the cycle before the restart
   EXPECT_EQ(s.length[0].counter, 253);
-  tickN(s, 14915 - 2);
+  tickN(s, 14915 - 1);
   EXPECT_EQ(s.length[0].counter, 252);
   tickN(s, 37283 - 14915);
   EXPECT_EQ(s.length[0].counter, 251);
@@ -262,21 +264,20 @@ TEST(FrameCounter, FiveStepFromAWriteOnAPutClocksAtTheRestartAndNeverSetsTheFlag
   tickN(s, 74565 - 52197);
   EXPECT_EQ(s.length[0].counter, 249);
   for (long tick = 74566; tick < 80000; ++tick) {
-    apuTickCycle(s);
+    apuTickCycle(s, kGet);
     EXPECT_FALSE(s.frameInterrupt);
     EXPECT_FALSE(s.irqLine);
   }
   EXPECT_FALSE(s.frameInterrupt);
 }
 
-TEST(FrameCounter, AWriteWithBit7SetOnAGetClocksAtTickThree) {
-  // NESdev wiki, "APU Frame Counter", Control register: 4 CPU cycles after a write
-  // between APU cycles.
+TEST(FrameCounter, AWriteWithBit7SetOnAGetClocksAtTickTwo) {
+  // NESdev wiki, "APU", Frame Counter: 2 or 3 cycles after the write.
   ApuState s = pulseLoaded(0x08);
   apuWrite(s, 0x4017, 0x80, kGet);
-  tickN(s, 3);  // through 2
+  tickN(s, 2);  // through 1
   EXPECT_EQ(s.length[0].counter, 254);
-  tickN(s, 1);  // 3
+  tickN(s, 1);  // 2
   EXPECT_EQ(s.length[0].counter, 253);
 }
 
@@ -369,21 +370,21 @@ TEST(FrameCounter, ResetKeepsTheModeAndTheHaltsAndClearsTheFlagAndTheCounters) {
   EXPECT_TRUE(s.inhibit);
   EXPECT_TRUE(s.fiveStep);
   EXPECT_EQ(s.restartDelay, 1);
-  // The restart's half-frame clock finds the counter at 0, and the load lands after it.
+  // A reset's restart makes no clock, and the load lands.
   apuWrite(s, 0x4015, 0x01, kGet);
   apuWrite(s, 0x4003, 0x08, kGet);
   tickN(s, 1);
   EXPECT_EQ(s.length[0].counter, 254);
 
-  // The other order: a load written in the restart's own cycle loses to its clock (blargg's
-  // 2005 frame counter readme, Length Reload).
+  // The other order: a load written in the cycle of the write's clock loses to it
+  // (blargg's 2005 frame counter readme, Length Reload).
   ApuState t = pulseLoaded(0x08);
   apuWrite(t, 0x4000, 0x10, kGet);
   apuWrite(t, 0x4017, 0x80, kPut);
-  tickN(t, 2);  // ticks 0 and 1
+  tickN(t, 1);  // tick 0
   EXPECT_EQ(t.length[0].counter, 254);
   apuWrite(t, 0x4003, 0x08, kGet);
-  tickN(t, 1);  // 2, the restart
+  tickN(t, 1);  // 1, the write's clock
   EXPECT_EQ(t.length[0].counter, 253);
 }
 

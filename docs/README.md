@@ -15,7 +15,7 @@ One row per page; each page lands with its component:
 | Page | Covers |
 |---|---|
 | [6502-cpu.md](6502-cpu.md) | The 2A03's CPU core — its bus and state, stepping it a cycle or an instruction at a time, where every cycle of every addressing mode goes, the interrupt, reset and halt sequences, the unofficial opcodes, and the vector suite |
-| [nes-machine.md](nes-machine.md) | The NES machine around the core — building it from a config value, the memory map and open bus, the APU's frame counter and length counters, stepping it by the cycle or by a master-cycle budget, the reset line, the clock, the controller ports, OAM DMA, the bus and save observers, snapshot and restore, and the test programs it runs |
+| [nes-machine.md](nes-machine.md) | The NES machine around the core — building it from a config value, the memory map and open bus, the APU's frame counter, length counters and channels, stepping it by the cycle or by a master-cycle budget, the reset line, the clock, the controller ports, OAM DMA, the bus and save observers, snapshot and restore, and the test programs it runs |
 | [nes-cartridge.md](nes-cartridge.md) | The cartridge as a value — the iNES and NES 2.0 headers byte by byte, the cartridge built from an image with a host's overrides, the pins a board sees, the board registry, and NROM |
 | [ppu.md](ppu.md) | The PPU's register file — the eight ports with their latches and side effects, the I/O bus and its decay, the scroll file, the chip's address space and the palette, the frame counter with its flag and odd-frame skip, the NMI output and the $2002 race, the warm-up, power-on and reset |
 

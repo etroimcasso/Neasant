@@ -33,16 +33,16 @@ embeddable. Pronounced "NESn't," like Peasant with an N.
 ## What is built
 
 The CPU, the machine around it and the cartridge are built and documented; the PPU holds its
-register file and frame timing with no picture, the APU its frame counter and length counters
-with no sound, and NROM is the one board. This table gains a
-row's link and description as each component lands.
+register file and frame timing with no picture, the APU its frame counter, length counters and
+pulse, triangle and noise channels with no DMC and no samples, and NROM is the one board. This
+table gains a row's link and description as each component lands.
 
 | Component | Status |
 |---|---|
 | [6502 CPU core](docs/6502-cpu.md) | **complete** — 256 opcodes, cycle-stepped, every cycle checked against the SingleStepTests nes6502 vectors; the reset, interrupt and RDY-halt sequences cycle by cycle |
 | [Machine (bus, RAM, cartridge boundary, controllers)](docs/nes-machine.md) | **complete** — the master-cycle budget, the console's bus and open bus, the two controller ports, OAM DMA, the bus and save observers, snapshot and restore; the CPU's self-checking test programs pass on it |
 | [PPU](docs/ppu.md) | **in progress** — the register file, the frame's timing and the NMI, with no picture |
-| APU ([the machine page's section](docs/nes-machine.md#the-apu)) | **in progress** — the frame counter with its interrupt on the CPU's IRQ line, the length counters and the status register, with no sound; blargg's APU frame-counter test programs pass |
+| APU ([the machine page's section](docs/nes-machine.md#the-apu)) | **in progress** — the frame counter with its interrupt on the CPU's IRQ line, the length counters, the status register, and the pulse, triangle and noise channels down to the level each feeds its DAC, with no DMC and no samples; blargg's APU frame-counter test programs pass |
 | [Mappers](docs/nes-cartridge.md) | **in progress** — the cartridge as a value, the pin-level board boundary, NROM |
 | Peripherals | **not started** |
 | Player | **not started** |

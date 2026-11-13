@@ -2,9 +2,10 @@
 
 // The NES as a machine around the 6502: the master clock and its budget, the bus as the
 // console decodes it, the 2 KB of work RAM, the open bus, the PPU with its ports, its
-// memories, its frame and its NMI output, the APU's frame counter, length counters and
-// status register, the two controller ports with the pads plugged into them, the OAM DMA
-// unit on the CPU's RDY line, and the cartridge on its board behind the pins.
+// memories, its frame and its NMI output, the APU's frame counter, length counters,
+// status register and pulse, triangle and noise channels, the two controller ports with
+// the pads plugged into them, the OAM DMA unit on the CPU's RDY line, and the cartridge
+// on its board behind the pins.
 //
 // A machine is built from one config value and is at power-on from then: the CPU's
 // reset sequence is pending, every RAM holds the seed, and the first seven cycles run
@@ -250,7 +251,8 @@ struct NesState {
   // Which half of the APU cycle the next machine cycle is, 0 a get and 1 a put; it
   // toggles every machine cycle (NESdev wiki, "DMA", Cadence).
   std::uint8_t apuPhase = 0;
-  // The APU: its frame counter, its length counters, its status and its IRQ line.
+  // The APU: its frame counter, its length counters, its channels, its status and its IRQ
+  // line.
   ApuState apu{};
   PpuState ppu{};
   // The cartridge's PRG RAM and CHR RAM, each sized at construction from the header or
@@ -312,9 +314,9 @@ class Nes {
   // and every flag but I, and a jammed core is released (NESdev wiki, "CPU power up
   // state", CPU). A transfer the OAM DMA unit has under way ends there and the CPU is
   // released (NESdev wiki, "CPU pinout", /RST). The APU is as apuReset leaves it: every
-  // channel disabled with its counter at 0, the frame interrupt flag clear, the sequence
-  // restarting in the mode last written. The PPU is as ppuReset
-  // leaves it: its counter back at the top of the picture and its warm-up window open,
+  // channel disabled with its counter at 0, the frame interrupt flag clear, the triangle
+  // at its first step, the sequence restarting in the mode last written. The PPU is as
+  // ppuReset leaves it: its counter back at the top of the picture and its warm-up window open,
   // its flag, its address and its memories kept. Work RAM, PRG RAM, CHR RAM, the open
   // bus, the strobe, the shift registers, the pads, the DMA page, the master counters
   // and the observers keep what they hold. Call it between step() and run() calls.
