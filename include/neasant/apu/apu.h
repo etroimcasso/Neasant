@@ -4,13 +4,13 @@
 // quarter- and half-frame clocks and its interrupt flag; the four length counters the
 // half-frame clock counts down, with their table, their halt bits and the enable bits
 // $4015 holds; the two pulse channels with their envelopes, sweeps, timers and duty
-// sequencers, the triangle with its linear counter and its 32-step sequencer, and the
-// noise with its envelope and its shift register, each answering the level its DAC
-// takes; the status register's read and write; the IRQ line the frame interrupt drives;
-// power-on and reset; and the seam the DMC's sample fetch takes through the machine's
-// DMA unit. The DMC's reader and output unit, the mixer and the decimator are absent: a
-// write to $4010-$4013 reaches the bus and is dropped, and the status register's DMC
-// bits read 0.
+// sequencers, the triangle with its linear counter and its 32-step sequencer, the noise
+// with its envelope and its shift register, and the DMC with its memory reader, its
+// sample buffer, its output unit and its interrupt flag, each channel answering the
+// level its DAC takes; the status register's read and write; the IRQ line the two
+// interrupt flags drive; power-on and reset; and the seam the DMC's sample fetch takes
+// through the machine's DMA unit. The mixer and the decimator are absent: no sample is
+// made from the levels.
 
 #include <array>
 #include <cstdint>
@@ -161,13 +161,71 @@ struct ApuNoise {
   [[nodiscard]] bool operator==(const ApuNoise&) const noexcept = default;
 };
 
+// What the DMC's memory reader is waiting to fetch: nothing, the first byte of a sample
+// after a $4015 write started it with the buffer empty, or the next byte after the output
+// unit emptied the buffer (NESdev wiki, "DMA", DMC DMA).
+enum class DmcFetch : std::uint8_t { None, Load, Reload };
+
+// The delta modulation channel (NESdev wiki, "APU DMC"): a memory reader that fetches a
+// sample's bytes one at a time through the machine's DMA unit, a one-byte sample buffer,
+// an output unit that shifts the buffered byte out a bit a clock and steps a 7-bit
+// counter by 2 up for a 1 and down for a 0, a timer clocking it at one of sixteen rates,
+// and the interrupt flag the fetch that ends a sample sets.
+struct ApuDmc {
+  // Bit 7 of $4010: set, the fetch that ends a sample sets the interrupt flag; a write
+  // clearing it clears the flag.
+  bool irqEnable = false;
+  // Bit 6 of $4010: set, a sample that ends restarts from $4012 and $4013 and sets no
+  // flag.
+  bool loop = false;
+  // Bits 3-0 of $4010: the entry of the rate table, the CPU cycles between two clocks of
+  // the output unit.
+  std::uint8_t rateIndex = 0;
+  // $4012 as written: a sample starts at $C000 plus 64 times it.
+  std::uint8_t sampleAddress = 0;
+  // $4013 as written: a sample is 16 times it plus 1 bytes long.
+  std::uint8_t sampleLength = 0;
+  // The reader's address, the next byte to fetch; it steps from $FFFF to $8000.
+  std::uint16_t address = 0;
+  // The reader's bytes remaining, bit 4 of a $4015 read while above 0. A $4015 write
+  // with bit 4 set restarts the sample when it is 0 and a write with bit 4 clear sets it
+  // to 0, the buffered byte still playing out.
+  std::uint16_t bytesRemaining = 0;
+  // The sample buffer: the byte the DMA unit delivered last, and whether the output unit
+  // has yet to take it.
+  std::uint8_t buffer = 0;
+  bool bufferFull = false;
+  // The fetch the reader is waiting for, which the machine's DMA unit carries out.
+  DmcFetch fetch = DmcFetch::None;
+  // Ticks since the sample stopped, by a $4015 write or by its last fetch, held at 3. A
+  // stop one or two ticks before the output unit empties the buffer still asks for a
+  // fetch, which the DMA unit abandons after its halt cycle (NESdev wiki, "DMA", Bugs).
+  std::uint8_t stopAge = 3;
+  // The output unit's shift register, the bits left in it, 8 down to 1, and the silence
+  // flag, set when a byte's cycle began with the buffer empty.
+  std::uint8_t shift = 0;
+  std::uint8_t bitsRemaining = 8;
+  bool silence = true;
+  // The timer's count, in APU cycles.
+  std::uint16_t timer = 0;
+  // The 7-bit counter, the level the channel's DAC takes: bits 6-0 of $4011 load it, and
+  // each clock with the silence flag clear steps it by 2, up for a 1 bit while it is
+  // below 126 and down for a 0 while it is above 1.
+  std::uint8_t output = 0;
+  // The interrupt flag, bit 7 of $4015: set by the fetch that ends a sample while bit 7
+  // of $4010 is set, cleared by any write to $4015 and by a $4010 write with bit 7
+  // clear.
+  bool interrupt = false;
+  [[nodiscard]] bool operator==(const ApuDmc&) const noexcept = default;
+};
+
 // The chip's whole mutable state as a value: snapshot by copy, restore by assignment.
 // The defaults are the power-on state (NESdev wiki, "CPU power up state", APU): every
 // register 0 and every channel disabled with its counter at 0, the triangle at its first
-// step, the noise's shift register 1, mode 0 with the interrupt enabled, the flag clear,
-// and the sequence restarting at the first machine cycle's tick, which puts its origin
-// nine cycles before the first instruction, the figure blargg's apu_reset programs
-// measure as usual.
+// step, the noise's shift register 1, the DMC silent with its level 0, mode 0 with the
+// interrupt enabled, the flag clear, and the sequence restarting at the first machine
+// cycle's tick, which puts its origin nine cycles before the first instruction, the
+// figure blargg's apu_reset programs measure as usual.
 struct ApuState {
   // Pulse 1, pulse 2, the triangle and the noise, in $4015's bit order.
   std::array<ApuLengthCounter, 4> length{};
@@ -175,6 +233,7 @@ struct ApuState {
   std::array<ApuPulse, 2> pulse{};
   ApuTriangle triangle{};
   ApuNoise noise{};
+  ApuDmc dmc{};
   // The mode the sequencer runs in: false the 4-step sequence, true the 5-step (NESdev
   // wiki, "APU Frame Counter").
   bool fiveStep = false;
@@ -186,9 +245,9 @@ struct ApuState {
   // the 4-step sequence, cleared by a read of $4015 and by a write to $4017 with bit 6 set
   // (NESdev wiki, "APU Frame Counter"; "APU", Status).
   bool frameInterrupt = false;
-  // The IRQ line as the CPU samples it: the flag with the inhibit clear, as they stood
-  // when the current tick began. A set reaches the line one cycle after a read of $4015
-  // sees it (NESdev wiki, "CPU interrupts", Detailed interrupt behavior: the level
+  // The IRQ line as the CPU samples it: the frame interrupt flag with the inhibit clear,
+  // or the DMC's interrupt flag, as they stood when the current tick began. A set
+  // reaches the line one cycle after a read of $4015 sees it (NESdev wiki, "CPU interrupts", Detailed interrupt behavior: the level
   // detector samples the line during the second half of a cycle and raises its signal the
   // cycle after).
   bool irqLine = false;
@@ -207,17 +266,14 @@ struct ApuState {
   [[nodiscard]] bool operator==(const ApuState&) const noexcept = default;
 };
 
-// What the DMC's memory reader is waiting to fetch: nothing, the first byte of a sample
-// after a $4015 write started it, or the next byte of one in progress (NESdev wiki,
-// "DMA", DMC DMA).
-enum class DmcFetch : std::uint8_t { None, Load, Reload };
-
-// The chip after the reset line: every channel disabled with its counter at 0, the frame
-// interrupt flag clear, the sequence restarting at the next tick in the mode last written
-// to $4017, the triangle's sequencer at its first step, and the pulses and the noise
-// silent. The inhibit bit, every halt bit, every channel register, every timer, envelope
-// and sweep, and the noise's shift register are kept (NESdev wiki, "CPU power up state",
-// APU, the After Reset column; "APU", Status; "APU Noise", Operation).
+// The chip after the reset line: every channel disabled with its counter at 0, the DMC's
+// sample stopped with its interrupt flag clear and its level keeping its low bit, the
+// frame interrupt flag clear, the sequence restarting at the next tick in the mode last
+// written to $4017, the triangle's sequencer at its first step, and the pulses and the
+// noise silent. The inhibit bit, every halt bit, every channel register, every timer,
+// envelope and sweep, the noise's shift register and the DMC's buffer and output unit
+// are kept (NESdev wiki, "CPU power up state", APU, the After Reset column; "APU",
+// Status; "APU Noise", Operation).
 void apuReset(ApuState& state) noexcept;
 
 // A CPU write to `address`, one of $4000-$4013, $4015 or $4017, in a cycle whose APU
@@ -225,34 +281,41 @@ void apuReset(ApuState& state) noexcept;
 // duty, halt bit, constant-volume bit and volume; $4001 and $4005 the sweep's fields,
 // setting its reload flag; $4002, $4006 and $400A the low eight bits of a timer's
 // period; $4003, $4007 and $400B the high three, and $400E the noise's mode and period
-// index. $4008 takes the triangle's halt bit and the linear counter's reload value. A
-// write to a fourth register, $4003, $4007, $400B or $400F, also loads the channel's
-// length counter from the table at the cycle's tick while the channel is enabled, and
-// whether or not it is enabled restarts a pulse's sequencer and its envelope, sets the
-// triangle's linear reload flag, or restarts the noise's envelope. $4015 sets the four
-// enables, clearing the counter of each channel it disables; $4017 sets the inhibit bit,
-// clearing the flag when it is set, and schedules the sequence's restart two cycles on
-// from a put cycle and three from a get. Every other address is dropped.
+// index. $4010 takes the DMC's interrupt enable, loop flag and rate, clearing the
+// interrupt flag when the enable is written clear; $4011 its level; $4012 and $4013 its
+// sample address and length. $4008 takes the triangle's halt bit and the linear
+// counter's reload value. A write to a fourth register, $4003, $4007, $400B or $400F,
+// also loads the channel's length counter from the table at the cycle's tick while the
+// channel is enabled, and whether or not it is enabled restarts a pulse's sequencer and
+// its envelope, sets the triangle's linear reload flag, or restarts the noise's
+// envelope. $4015 sets the four enables, clearing the counter of each channel it
+// disables; its bit 4 clear stops the DMC's sample and set restarts one whose bytes
+// remaining are 0, asking for the first byte at once when the buffer is empty, and the
+// write clears the DMC's interrupt flag; $4017 sets the inhibit bit, clearing the flag
+// when it is set, and schedules the sequence's restart two cycles on from a put cycle
+// and three from a get. Every other address is dropped.
 void apuWrite(ApuState& state, std::uint16_t address, std::uint8_t value,
               std::uint8_t apuPhase) noexcept;
 
-// A CPU read of $4015: bit 6 the frame interrupt flag, bits 3-0 whether each length
-// counter is above 0, bit 5 the open bus's, bits 7 and 4 0, and the flag is then
-// cleared (NESdev wiki, "APU", Status). A set the same cycle's tick makes is not cleared
-// by it, since the tick runs after the access.
+// A CPU read of $4015: bit 7 the DMC's interrupt flag, bit 6 the frame interrupt flag,
+// bit 4 whether the DMC's bytes remaining are above 0, bits 3-0 whether each length
+// counter is above 0, bit 5 the open bus's, and the frame interrupt flag is then cleared
+// (NESdev wiki, "APU", Status). A set the same cycle's tick makes is not cleared by it,
+// since the tick runs after the access; the DMC's flag is not cleared by a read.
 [[nodiscard]] std::uint8_t apuReadStatus(ApuState& state, std::uint8_t openBus) noexcept;
 
 // What a read of $4015 would answer, with nothing cleared.
 [[nodiscard]] std::uint8_t apuPeekStatus(const ApuState& state, std::uint8_t openBus) noexcept;
 
 // One CPU cycle, in the half of the APU cycle `apuPhase` names, 0 a get and 1 a put:
-// samples the IRQ line from the flag, counts the restart delay down and restarts the
-// sequence when it reaches 0, otherwise steps the counter and runs the step that falls on
-// it, the quarter-frame clock on the envelopes and the linear counter and the half-frame
-// clock on the sweeps and the length counters; applies each channel's pending load and
-// latches its halt bit; counts the triangle's timer, and on a get cycle the pulses' and
-// the noise's, so that their sequencer and shift register change as a put cycle begins
-// (Visual 2A03); and leaves each channel's output as the tick's end finds it.
+// samples the IRQ line from the two interrupt flags, lets a DMC fetch request lapse once
+// its bytes remaining are 0, counts the restart delay down and restarts the sequence
+// when it reaches 0, otherwise steps the counter and runs the step that falls on it, the
+// quarter-frame clock on the envelopes and the linear counter and the half-frame clock
+// on the sweeps and the length counters; applies each channel's pending load and latches
+// its halt bit; counts the triangle's timer, and on a get cycle the pulses', the noise's
+// and the DMC's, so that their sequencer and shift register change as a put cycle
+// begins (Visual 2A03); and leaves each channel's output as the tick's end finds it.
 void apuTickCycle(ApuState& state, std::uint8_t apuPhase) noexcept;
 
 // The chip's IRQ output, true while it is pulled low: the line as the last tick sampled
@@ -262,11 +325,19 @@ void apuTickCycle(ApuState& state, std::uint8_t apuPhase) noexcept;
 }
 
 // The fetch the DMC's reader is waiting to make, which the machine's DMA unit carries
-// out on the CPU's RDY line; DmcFetch::None while the DMC holds no reader.
-[[nodiscard]] DmcFetch apuDmcWantsFetch(const ApuState& state) noexcept;
+// out on the CPU's RDY line from the reader's address: a load from the cycle after the
+// $4015 write that started the sample, a reload from the cycle after the tick in which
+// the output unit emptied the buffer. The request stands until the byte is delivered,
+// and lapses at the next tick once the bytes remaining are 0 (NESdev wiki, "DMA", DMC
+// DMA and Bugs).
+[[nodiscard]] constexpr DmcFetch apuDmcWantsFetch(const ApuState& state) noexcept {
+  return state.dmc.fetch;
+}
 
-// Puts a byte the DMA unit fetched into the DMC's sample buffer; with no buffer built the
-// byte is dropped.
+// Puts the byte the DMA unit fetched into the sample buffer, steps the reader's address,
+// wrapping from $FFFF to $8000, and counts its bytes remaining down; at 0 the sample
+// restarts from $4012 and $4013 while $4010 bit 6 is set, and otherwise ends, setting the
+// interrupt flag while $4010 bit 7 is set (NESdev wiki, "APU DMC", Memory reader).
 void apuDmcDeliver(ApuState& state, std::uint8_t byte) noexcept;
 
 }  // namespace neasant

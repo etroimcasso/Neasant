@@ -533,6 +533,9 @@ TEST(NesReset, ResetKeepsWhatItKeeps) {
   EXPECT_TRUE(s.apu.fiveStep);
   EXPECT_TRUE(s.apu.inhibit);
   EXPECT_TRUE(s.apu.length[0].halt);
+  // the DMC's level, $7F before the reset, keeps its low bit ("CPU power up state", APU,
+  // the After Reset column)
+  EXPECT_EQ(s.apu.dmc.output, 1);
   EXPECT_EQ(s.ram[0], 0x55);
   EXPECT_EQ(s.ppu.ioLatch, 0x7F);
   EXPECT_TRUE(s.strobe);

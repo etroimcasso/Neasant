@@ -29,6 +29,14 @@ constexpr std::uint8_t kGetHalf = 0;
 // The port the OAM DMA unit writes each byte to (NESdev wiki, "DMA", OAM DMA).
 constexpr std::uint16_t kOamDataPort = 0x2004;
 
+// The cycles a DMC fetch waits after it is taken before its halt is attempted: a load
+// halts on the get cycle of the second APU cycle after the $4015 write, two cycles on
+// from a get and three from a put; a reload attempts at once (NESdev wiki, "DMA", DMC
+// DMA).
+constexpr std::uint8_t kLoadDelayFromGet = 2;
+constexpr std::uint8_t kLoadDelayFromPut = 3;
+constexpr std::uint8_t kReloadDelay = 0;
+
 // The buttons in shift order, and their names.
 constexpr std::array<Button, kButtonCount> kButtons{Button::A,  Button::B,    Button::Select,
                                                     Button::Start, Button::Up, Button::Down,
@@ -187,11 +195,14 @@ void Nes::reset() {
   // programs: the last value written to $4017 is written again.
   apuReset(state_.apu);
   // NESdev wiki, "CPU pinout", /RST: the line holds the CPU in reset with its pins
-  // released, and the CPU starts at the reset vector when it is let go, so a transfer
-  // under way ends here and the halted read is not resumed; the page latch keeps its
-  // byte.
+  // released, and the CPU starts at the reset vector when it is let go, so a transfer or
+  // a fetch under way ends here and the halted read is not resumed; the page latch keeps
+  // its byte.
   state_.dma.stage = DmaStage::Idle;
   state_.dma.index = 0;
+  state_.dma.dmc = DmcFetch::None;
+  state_.dma.dmcStage = DmcStage::Idle;
+  state_.dma.dmcDelay = 0;
   cpu_.setRdyLine(true);
   // NESdev wiki, "PPU power up state": a front-loading console's reset line resets the
   // PPU with the CPU.
@@ -423,45 +434,108 @@ void Nes::cpuCycle() {
 
 void Nes::busCycle() {
   Dma& dma = state_.dma;
+  const bool getCycle = state_.apuPhase == kGetHalf;
+  const DmcFetch wanted = apuDmcWantsFetch(state_.apu);
+  // The DMC's fetch, against the reader's request (NESdev wiki, "DMA", DMC DMA and Bugs):
+  // taken in the cycle after the reader asks, a load's halt attempted on the get cycle of
+  // the second APU cycle after the $4015 write and a reload's at once; dropped while the
+  // request lapses before the halt, abandoned after the halt cycle when it lapses then.
+  switch (dma.dmcStage) {
+    case DmcStage::Idle:
+      if (wanted != DmcFetch::None) {
+        dma.dmc = wanted;
+        dma.dmcStage = DmcStage::Halt;
+        dma.dmcDelay = wanted != DmcFetch::Load ? kReloadDelay
+                       : getCycle               ? kLoadDelayFromGet
+                                                : kLoadDelayFromPut;
+      }
+      break;
+    case DmcStage::Halt:
+      if (wanted == DmcFetch::None) {
+        dma.dmc = DmcFetch::None;
+        dma.dmcStage = DmcStage::Idle;
+        if (dma.stage == DmaStage::Idle) cpu_.setRdyLine(true);
+      } else if (dma.dmcDelay > 0) {
+        --dma.dmcDelay;
+      }
+      break;
+    case DmcStage::Dummy:
+      if (wanted == DmcFetch::None) {
+        dma.dmc = DmcFetch::None;
+        dma.dmcStage = DmcStage::Idle;
+        if (dma.stage == DmaStage::Idle) cpu_.setRdyLine(true);
+      }
+      break;
+    case DmcStage::Get:
+      break;
+  }
+  const bool dmcAttempt = dma.dmcStage == DmcStage::Halt && dma.dmcDelay == 0;
+  const bool dmcHolds = dma.dmcStage == DmcStage::Dummy || dma.dmcStage == DmcStage::Get;
+  const DmcStage dmcBefore = dma.dmcStage;
+
+  if (dma.dmcStage == DmcStage::Get && getCycle) {
+    // NESdev wiki, "DMA", DMC DMA during OAM DMA: the DMC's get takes the bus whatever the
+    // OAM unit was about to do; the transfer waits and aligns again. The read goes through
+    // the bus as the CPU's would, in the DMC's name.
+    const std::uint8_t byte =
+        busRead(state_.apu.dmc.address, CycleKind::DataRead, AccessSource::DmcDma);
+    apuDmcDeliver(state_.apu, byte);
+    dma.dmc = DmcFetch::None;
+    dma.dmcStage = DmcStage::Idle;
+    if (dma.stage == DmaStage::Idle) cpu_.setRdyLine(true);
+    return;
+  }
+
+  bool held = false;
   switch (dma.stage) {
     case DmaStage::Idle:
-      cpuCycle();
-      return;
     case DmaStage::Halt:
-      // NESdev wiki, "DMA", Behavior: the unit halts the CPU through RDY, which the CPU
-      // allows on a read cycle only; a write proceeds and the unit tries again on the
-      // next cycle. The halt cycle is the read the CPU then repeats.
-      cpu_.setRdyLine(false);
+      // NESdev wiki, "DMA", Behavior: a unit halts the CPU through RDY, which the CPU
+      // allows on a read cycle only; a write proceeds and the unit tries again on the next
+      // cycle. The halt cycle is the read the CPU then repeats, and so is every
+      // no-operation cycle of the DMC's fetch.
+      if (dma.stage == DmaStage::Halt || dmcAttempt || dmcHolds) cpu_.setRdyLine(false);
       cpuCycle();
-      if (cpu_.state().rdyHeld) dma.stage = DmaStage::Get;
-      return;
+      held = cpu_.state().rdyHeld;
+      if (held && dma.stage == DmaStage::Halt) dma.stage = DmaStage::Get;
+      break;
     case DmaStage::Get:
       // NESdev wiki, "DMA", Cadence and OAM DMA: the unit reads on a get cycle only, so
       // a put cycle before the read is an alignment cycle, on which the halted CPU
       // repeats its read (Register conflicts). The read goes through the bus as the
       // CPU's would, in the unit's name.
-      if (state_.apuPhase != kGetHalf) {
+      held = true;
+      if (!getCycle) {
         cpuCycle();
-        return;
+        break;
       }
       dma.byte = busRead(static_cast<std::uint16_t>((dma.page << 8) | dma.index),
                          CycleKind::DataRead, AccessSource::OamDma);
       dma.stage = DmaStage::Put;
-      return;
+      break;
     case DmaStage::Put:
       // NESdev wiki, "DMA", OAM DMA: the byte is written to $2004 on the put cycle that
-      // follows its get; after the 256th the CPU is released and performs the read it
-      // was halted on.
+      // follows its get; after the 256th the CPU is released, unless the DMC's fetch
+      // still holds it, and performs the read it was halted on.
+      held = true;
       busWrite(kOamDataPort, dma.byte, CycleKind::DataWrite, AccessSource::OamDma);
       if (dma.index == 255) {
         dma.index = 0;
         dma.stage = DmaStage::Idle;
-        cpu_.setRdyLine(true);
+        if (!dmcAttempt && !dmcHolds) cpu_.setRdyLine(true);
       } else {
         ++dma.index;
         dma.stage = DmaStage::Get;
       }
-      return;
+      break;
+  }
+
+  // NESdev wiki, "DMA", DMC DMA: after the halt cycle a dummy cycle, then the get, with an
+  // alignment cycle between when the dummy's successor is a put.
+  if (dmcAttempt && held) {
+    dma.dmcStage = DmcStage::Dummy;
+  } else if (dmcBefore == DmcStage::Dummy) {
+    dma.dmcStage = DmcStage::Get;
   }
 }
 

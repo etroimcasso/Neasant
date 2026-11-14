@@ -21,6 +21,9 @@ set(NEASANT_NES6502_VECTORS "" CACHE PATH
 set(NEASANT_NES_TEST_ROMS "" CACHE PATH
     "Directory holding a clone of christopherpow/nes-test-roms")
 
+set(NEASANT_DMC_PROGRAMS_DIR "" CACHE PATH
+    "Directory holding Fiskbit's dmc_dma_start_test/ and dmc_dma_start_test_v2/ and Damian Yerrick's dpcmletterbox/, each with its ROM; empty skips their cases")
+
 # ── Build type ──────────────────────────────────────────────────────────────
 # A build is optimized by default. Debug is an explicit, temporary opt-in.
 if(NEASANT_IS_TOP_LEVEL AND NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)

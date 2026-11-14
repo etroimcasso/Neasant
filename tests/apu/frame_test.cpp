@@ -715,8 +715,7 @@ TEST(ApuReset, RomLenCtrsEnabled) {
 // The frame counter, the status and the length counters working at power-on and after
 // reset, read with the DMC's two status bits (its readme and source).
 TEST(ApuReset, RomWorksImmediately) {
-  skipNeeding("apu_reset/works_immediately.nes",
-              "the DMC's active bit and interrupt flag in $4015, which are not built");
+  expectPass("apu_reset/works_immediately.nes", Report::Memory);
 }
 
 // ---- blargg_apu_2005.07.30 ----

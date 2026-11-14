@@ -54,6 +54,16 @@ constexpr std::array<std::uint8_t, 32> kTriangleSequence{
 constexpr std::array<std::uint16_t, 16> kNoisePeriod{
     4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068};
 
+// The CPU cycles between two clocks of the DMC's output unit, by bits 3-0 of $4010
+// (NESdev wiki, "APU DMC", Pitch table, the NTSC column).
+constexpr std::array<std::uint16_t, 16> kDmcRate{
+    428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54};
+
+// The DMC's level steps by 2 within 0 to 127: up while it is below 126, down while it is
+// above 1 (NESdev wiki, "APU DMC", Output unit).
+constexpr std::uint8_t kDmcLevelCeiling = 126;
+constexpr std::uint8_t kDmcLevelFloor = 1;
+
 // A pulse is silent while its period is below 8 or its sweep's target is above $7FF
 // (NESdev wiki, "APU Pulse", Sequencer operation and Sweep unit operation).
 constexpr std::uint16_t kPeriodFloor = 8;
@@ -184,6 +194,45 @@ void restart(ApuState& state) noexcept {
   state.fiveStep = state.pendingFiveStep;
 }
 
+// The reader's address and length from $4012 and $4013 (NESdev wiki, "APU DMC", Sample
+// address and Sample length).
+void restartSample(ApuDmc& dmc) noexcept {
+  dmc.address = static_cast<std::uint16_t>(0xC000u + 64u * dmc.sampleAddress);
+  dmc.bytesRemaining = static_cast<std::uint16_t>(16u * dmc.sampleLength + 1u);
+}
+
+// One clock of the DMC's output unit (NESdev wiki, "APU DMC", Output unit; blargg's NES
+// APU reference, Output Unit): the level steps by the bit shifted out unless the silence
+// flag is set; after the eighth bit a new cycle takes the buffered byte, emptying the
+// buffer and asking the reader for the next, or sets the silence flag when there is
+// none. A reader whose sample stopped one or two ticks ago still asks, and the DMA unit
+// abandons the fetch after its halt cycle (NESdev wiki, "DMA", Bugs).
+void clockDmcOutput(ApuDmc& dmc) noexcept {
+  if (!dmc.silence) {
+    if ((dmc.shift & 1u) != 0) {
+      if (dmc.output < kDmcLevelCeiling) dmc.output = static_cast<std::uint8_t>(dmc.output + 2);
+    } else if (dmc.output > kDmcLevelFloor) {
+      dmc.output = static_cast<std::uint8_t>(dmc.output - 2);
+    }
+  }
+  dmc.shift = static_cast<std::uint8_t>(dmc.shift >> 1);
+  if (dmc.bitsRemaining > 1) {
+    --dmc.bitsRemaining;
+    return;
+  }
+  dmc.bitsRemaining = 8;
+  if (!dmc.bufferFull) {
+    dmc.silence = true;
+    return;
+  }
+  dmc.shift = dmc.buffer;
+  dmc.bufferFull = false;
+  dmc.silence = false;
+  if (dmc.bytesRemaining > 0 || dmc.stopAge == 1 || dmc.stopAge == 2) {
+    dmc.fetch = DmcFetch::Reload;
+  }
+}
+
 }  // namespace
 
 void apuReset(ApuState& state) noexcept {
@@ -202,6 +251,13 @@ void apuReset(ApuState& state) noexcept {
   // first step after reset; "APU Noise", Operation: reset does not affect the shift
   // register.
   state.triangle.step = 0;
+  // NESdev wiki, "APU", Status: the write of $00 stops the DMC's sample and clears its
+  // interrupt flag; "CPU power up state", APU, the After Reset column: $4011 keeps its low
+  // bit.
+  state.dmc.bytesRemaining = 0;
+  state.dmc.fetch = DmcFetch::None;
+  state.dmc.interrupt = false;
+  state.dmc.output = static_cast<std::uint8_t>(state.dmc.output & 1u);
   refreshOutputs(state);
 }
 
@@ -282,7 +338,27 @@ void apuWrite(ApuState& state, std::uint16_t address, std::uint8_t value,
       }
       break;
     }
-    case 0x4015:
+    case 0x4010: {
+      // NESdev wiki, "APU DMC", Flags and sample playback rate; blargg's NES APU reference,
+      // DMC: a write with the interrupt bit clear clears the flag.
+      ApuDmc& dmc = state.dmc;
+      dmc.irqEnable = (value & 0x80u) != 0;
+      dmc.loop = (value & 0x40u) != 0;
+      dmc.rateIndex = static_cast<std::uint8_t>(value & 0x0Fu);
+      if (!dmc.irqEnable) dmc.interrupt = false;
+      break;
+    }
+    case 0x4011:
+      // NESdev wiki, "APU DMC", Direct counter load.
+      state.dmc.output = static_cast<std::uint8_t>(value & 0x7Fu);
+      break;
+    case 0x4012:
+      state.dmc.sampleAddress = value;
+      break;
+    case 0x4013:
+      state.dmc.sampleLength = value;
+      break;
+    case 0x4015: {
       // NESdev wiki, "APU", Status: a cleared enable bit silences its channel and halts
       // its length counter at 0; "APU Length Counter", Clocking: setting it has no
       // immediate effect.
@@ -294,7 +370,23 @@ void apuWrite(ApuState& state, std::uint16_t address, std::uint8_t value,
           length.reloadPending = false;
         }
       }
+      // NESdev wiki, "APU DMC", Sample playback control: bit 4 clear sets the bytes
+      // remaining to 0; bit 4 set restarts the sample only when they are 0, and the first
+      // byte is fetched at once only when the buffer is empty ("DMA", DMC DMA); the write
+      // clears the interrupt flag.
+      ApuDmc& dmc = state.dmc;
+      if ((value & 0x10u) == 0) {
+        if (dmc.bytesRemaining > 0) {
+          dmc.bytesRemaining = 0;
+          dmc.stopAge = 0;
+        }
+      } else if (dmc.bytesRemaining == 0) {
+        restartSample(dmc);
+        if (!dmc.bufferFull) dmc.fetch = DmcFetch::Load;
+      }
+      dmc.interrupt = false;
       break;
+    }
     case 0x4017:
       // NESdev wiki, "APU Frame Counter", Control register: bit 7 the mode, bit 6 the
       // interrupt inhibit, whose setting clears the flag; the counter is reset 3 or 4 CPU
@@ -312,7 +404,9 @@ void apuWrite(ApuState& state, std::uint16_t address, std::uint8_t value,
 std::uint8_t apuPeekStatus(const ApuState& state, std::uint8_t openBus) noexcept {
   // NESdev wiki, "APU", Status: IF-D NT21, bit 5 open bus.
   auto value = static_cast<std::uint8_t>(openBus & 0x20u);
+  if (state.dmc.interrupt) value = static_cast<std::uint8_t>(value | 0x80u);
   if (state.frameInterrupt) value = static_cast<std::uint8_t>(value | 0x40u);
+  if (state.dmc.bytesRemaining > 0) value = static_cast<std::uint8_t>(value | 0x10u);
   for (std::size_t i = 0; i < state.length.size(); ++i) {
     if (state.length[i].counter > 0) value = static_cast<std::uint8_t>(value | (1u << i));
   }
@@ -327,7 +421,12 @@ std::uint8_t apuReadStatus(ApuState& state, std::uint8_t openBus) noexcept {
 }
 
 void apuTickCycle(ApuState& state, std::uint8_t apuPhase) noexcept {
-  state.irqLine = state.frameInterrupt && !state.inhibit;
+  state.irqLine = (state.frameInterrupt && !state.inhibit) || state.dmc.interrupt;
+  // A fetch the reader asked for lapses once its sample has stopped: the DMA unit drops
+  // one it has not yet halted for and abandons one it has (NESdev wiki, "DMA", Bugs).
+  if (state.dmc.fetch != DmcFetch::None && state.dmc.bytesRemaining == 0) {
+    state.dmc.fetch = DmcFetch::None;
+  }
   bool quarter = false;
   bool half = false;
   bool restarted = false;
@@ -417,17 +516,40 @@ void apuTickCycle(ApuState& state, std::uint8_t apuPhase) noexcept {
       const unsigned feedback = (noise.shift ^ (noise.shift >> tap)) & 1u;
       noise.shift = static_cast<std::uint16_t>((noise.shift >> 1) | (feedback << 14));
     }
+    // NESdev wiki, "APU", Glossary: the DMC's timer is clocked every second CPU cycle;
+    // Visual 2A03: its output unit changes as a put cycle begins. The table counts CPU
+    // cycles and the timer APU cycles: half the entry, less one for the count through 0.
+    ApuDmc& dmc = state.dmc;
+    if (dmc.timer > 0) {
+      --dmc.timer;
+    } else {
+      dmc.timer = static_cast<std::uint16_t>(kDmcRate[dmc.rateIndex] / 2 - 1);
+      clockDmcOutput(dmc);
+    }
   }
+  if (state.dmc.stopAge < 3) ++state.dmc.stopAge;
   refreshOutputs(state);
 }
 
-DmcFetch apuDmcWantsFetch(const ApuState&) noexcept {
-  // The DMC holds no reader, so no fetch is ever waiting.
-  return DmcFetch::None;
-}
-
-void apuDmcDeliver(ApuState&, std::uint8_t) noexcept {
-  // The DMC holds no sample buffer, so the byte is dropped.
+void apuDmcDeliver(ApuState& state, std::uint8_t byte) noexcept {
+  // NESdev wiki, "APU DMC", Memory reader: the address wraps from $FFFF to $8000; at the
+  // last byte the sample restarts with the loop flag set and otherwise ends, setting the
+  // interrupt flag with the interrupt enabled.
+  ApuDmc& dmc = state.dmc;
+  dmc.buffer = byte;
+  dmc.bufferFull = true;
+  dmc.fetch = DmcFetch::None;
+  dmc.address = dmc.address == 0xFFFFu ? std::uint16_t{0x8000}
+                                       : static_cast<std::uint16_t>(dmc.address + 1u);
+  if (dmc.bytesRemaining == 0) return;
+  --dmc.bytesRemaining;
+  if (dmc.bytesRemaining > 0) return;
+  if (dmc.loop) {
+    restartSample(dmc);
+  } else {
+    dmc.stopAge = 0;
+    if (dmc.irqEnable) dmc.interrupt = true;
+  }
 }
 
 }  // namespace neasant

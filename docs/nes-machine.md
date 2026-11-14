@@ -2,21 +2,21 @@
 
 `Nes` is the console around the 6502 core: the master clock and its budget, the bus as the
 console decodes it, the 2 KB of work RAM and the open bus, the PPU's register file and frame
-([its own page](ppu.md)), the APU's frame counter, status register and pulse, triangle and noise
-channels, the two controller ports, the OAM DMA unit on the CPU's RDY line, and the cartridge on its board behind
-the pins ([its own page](nes-cartridge.md)).
+([its own page](ppu.md)), the APU's frame counter, status register and five channels, the two
+controller ports, the DMA unit on the CPU's RDY line, and the cartridge on its board behind the
+pins ([its own page](nes-cartridge.md)).
 A host builds a machine from one config value, steps it a machine cycle or a master-cycle budget
 at a time, holds the whole mutable machine as one state value, and is told about the bus and the
 save through two observers it sets.
 
 The machine runs a program's code against the console's bus, its timing and its interrupts, and
-the CPU's and the APU frame counter's self-checking test programs pass on it
+the CPU's and the APU's self-checking test programs pass on it
 ([Testing against the programs](#testing-against-the-programs)). The PPU is its register file,
 its memories, its frame counter and its NMI output, with no tile fetched. The APU is its frame
-counter, its status register and its pulse, triangle and noise channels, each answering the level
-its DAC takes, with the frame interrupt on the CPU's IRQ line ([The APU](#the-apu)); no sample is
-mixed from the levels and the DMC does not fetch. PAL and
-Dendy are named by `Region` and refused at construction, so every machine is NTSC.
+counter, its status register and its five channels, each answering the level its DAC takes, with
+the DMC fetching its samples through the DMA unit and both interrupts on the CPU's IRQ line
+([The APU](#the-apu)); no sample is mixed from the levels. PAL and Dendy are named by `Region`
+and refused at construction, so every machine is NTSC.
 
 The status table in the [README](../README.md) is the component's status row. The CPU core the
 machine steps is on [the 6502 core's page](6502-cpu.md).
@@ -36,7 +36,7 @@ machine steps is on [the 6502 core's page](6502-cpu.md).
 - [The clock](#the-clock)
 - [The controller ports](#the-controller-ports)
   - [Reading a pad](#reading-a-pad)
-- [OAM DMA](#oam-dma)
+- [OAM DMA and the DMC's fetch](#oam-dma-and-the-dmcs-fetch)
 - [The bus observer](#the-bus-observer)
 - [The save observer](#the-save-observer)
 - [Snapshot and restore](#snapshot-and-restore)
@@ -158,7 +158,8 @@ struct NesConfig {
   CPU-PPU Clock Alignment).
 - `apuPhase` is which half of the APU cycle the first CPU cycle falls in, 0 a get and 1 a put,
   random at power-on on the hardware (NESdev wiki, "DMA", Summary and Cadence). It decides
-  whether an OAM DMA transfer takes 513 or 514 cycles ([OAM DMA](#oam-dma)).
+  whether an OAM DMA transfer takes 513 or 514 cycles
+  ([OAM DMA and the DMC's fetch](#oam-dma-and-the-dmcs-fetch)).
 - `vblankAtPowerOn` is the vertical-blank flag's value at power-on, random on the hardware and
   usually found set (NESdev wiki, "PPU power up state", the note on the VBL flag).
 - `ppuOpenBusDecay` is how long a bit of the PPU's I/O bus keeps a value, in master cycles, 0
@@ -227,9 +228,9 @@ through one decode:
 | `$0800-$1FFF` | work RAM again, three times |
 | `$2000-$2007` | the PPU's eight ports ([the PPU page](ppu.md#the-ports)) |
 | `$2008-$3FFF` | the ports again, every eight bytes |
-| `$4000-$4013` | the APU's channel registers: a write to `$4000-$400F` sets the pulse, triangle or noise fields the register holds, and a write to `$4010-$4013`, the DMC's, is dropped; a read answers the open bus ([The APU](#the-apu)) |
+| `$4000-$4013` | the APU's channel registers: a write sets the pulse, triangle, noise or DMC fields the register holds; a read answers the open bus ([The APU](#the-apu)) |
 | `$4014` | OAM DMA: a write starts a transfer; a read answers the open bus |
-| `$4015` | the APU's status: a read answers the frame interrupt flag and the length counters over bit 5 of the open bus, and clears the flag; a write sets the channels' enables |
+| `$4015` | the APU's status: a read answers the two interrupt flags, the DMC's active bit and the length counters over bit 5 of the open bus, and clears the frame interrupt flag; a write sets the channels' enables and starts or stops the DMC's sample |
 | `$4016` | a write is the controllers' strobe; a read is port one |
 | `$4017` | a write is the APU's frame counter; a read is port two |
 | `$4018-$401F` | nothing on a retail console: a read answers the open bus, a write lands nowhere |
@@ -272,9 +273,10 @@ for (int cycle = 0; cycle < 7 + 4 + 3 + 4 + 3; ++cycle) machine.step();
 ### The APU
 
 `state().apu` is the APU as one value, `ApuState` (`neasant/apu/apu.h`): the frame counter, the
-four length counters, the two pulses, the triangle and the noise, and the frame interrupt flag with
-the IRQ line it drives. The APU ticks once a machine cycle, after the cycle's access, and the tick
-is given the half of the APU cycle the machine cycle falls in ([A machine cycle](#a-machine-cycle)).
+four length counters, the two pulses, the triangle, the noise and the DMC, and the two interrupt
+flags with the IRQ line they drive. The APU ticks once a machine cycle, after the cycle's access,
+and the tick is given the half of the APU cycle the machine cycle falls in
+([A machine cycle](#a-machine-cycle)).
 
 - **The frame counter** runs the 4-step sequence or the 5-step one by `$4017` bit 7, counting CPU
   cycles from its origin. The quarter-frame clock falls at cycles 7457, 14 913, 22 371 and 29 829
@@ -292,10 +294,10 @@ is given the half of the APU cycle the machine cycle falls in ([A machine cycle]
   it. A read of `$4015` clears it, and so does a write to `$4017` with bit 6 set. A read in the
   second or third of those cycles answers the flag set and that cycle's tick sets it again
   (NESdev wiki, "APU", Status; "APU Frame Counter").
-- **The IRQ line** is the flag with the inhibit clear, sampled at the start of each tick, so it
-  follows the flag a cycle later, and the CPU's level detector takes it at the end of that cycle
-  (NESdev wiki, "CPU interrupts", Detailed interrupt behavior). With I clear, the CPU takes the
-  interrupt at its next poll.
+- **The IRQ line** is the frame interrupt flag with the inhibit clear, or the DMC's interrupt
+  flag, sampled at the start of each tick, so it follows a flag a cycle later, and the CPU's level
+  detector takes it at the end of that cycle (NESdev wiki, "CPU interrupts", Detailed interrupt
+  behavior). With I clear, the CPU takes the interrupt at its next poll.
 - **The length counters**, one each for pulse 1, pulse 2, the triangle and the noise. A write to a
   channel's fourth register, `$4003`, `$4007`, `$400B` or `$400F`, loads its counter from the
   32-entry table by bits 7–3 while the channel is enabled; the half-frame clock counts each
@@ -338,22 +340,36 @@ is given the half of the APU cycle the machine cycle falls in ([A machine cycle]
   exclusive OR of bits 0 and 1, or of bits 0 and 6 with bit 7 of `$400E` set, which shortens the
   sequence from 32 767 steps to 93 or 31. `noise.output` is the envelope's volume while bit 0 of
   the register is clear and the length counter is above 0 (NESdev wiki, "APU Noise").
-- **The status read** answers `$4015` as `IF-D NT21`: bit 6 the flag, bits 3–0 whether each
-  counter is above 0, bit 5 the open bus, and bits 7 and 4, the DMC's, 0 (NESdev wiki, "APU",
-  Status).
+- **The DMC.** A write to `$4015` with bit 4 set starts a sample whose bytes remaining are 0: the
+  reader takes its address, `$C000` plus 64 times `$4012`, and its length, 16 times `$4013` plus
+  1, and asks the DMA unit for the first byte at once when the sample buffer is empty
+  ([OAM DMA and the DMC's fetch](#oam-dma-and-the-dmcs-fetch)). Each fetched byte waits in the
+  buffer until the output unit, which runs at the rate bits 3–0 of `$4010` name, 428 down to 54
+  CPU cycles a bit, takes it after the eighth bit of the last; the reader then asks for the next
+  while bytes remain, the address stepping from `$FFFF` to `$8000`. Each bit steps the 7-bit
+  level, `dmc.output`, by 2, up for a 1 while it is below 126 and down for a 0 while it is above
+  1; a write to `$4011` loads the level directly. The fetch that ends a sample restarts it while
+  bit 6 of `$4010` is set and otherwise sets the interrupt flag, bit 7 of `$4015`, while bit 7 of
+  `$4010` is set; any write to `$4015` and a `$4010` write with bit 7 clear clear the flag. A
+  write to `$4015` with bit 4 clear sets the bytes remaining to 0 and the buffered byte plays out
+  (NESdev wiki, "APU DMC"; "APU", Status).
+- **The status read** answers `$4015` as `IF-D NT21`: bit 7 the DMC's interrupt flag, bit 6 the
+  frame interrupt flag, bit 4 whether the DMC's bytes remaining are above 0, bits 3–0 whether each
+  counter is above 0, bit 5 the open bus (NESdev wiki, "APU", Status).
 - **Power-on and reset.** At power-on the sequence starts at the first cycle's tick, nine cycles
   before the first instruction, the usual figure of the 9 to 12 that blargg's `apu_reset` readme
   measures, in the 4-step mode with the interrupt enabled; every channel is disabled and every
   register 0, the triangle stands at its first step with its level 15, and the noise's shift
-  register holds 1 (NESdev wiki, "CPU power up state", APU; "APU Noise", Operation). A reset
-  disables every channel, clears the flag, returns the triangle to its first step and restarts the
-  sequence on the next cycle in the mode last written to `$4017`; the channels' registers, timers,
-  envelopes and sweeps and the noise's shift register keep their values
-  ([The reset line](#the-reset-line)).
+  register holds 1, and the DMC is silent with its level 0 (NESdev wiki, "CPU power up state",
+  APU; "APU Noise", Operation). A reset disables every channel, clears the flag, returns the
+  triangle to its first step, stops the DMC's sample with its level's low bit kept, clears the
+  DMC's interrupt flag and restarts the sequence on the next cycle in the mode last written to
+  `$4017`; the channels' registers, timers, envelopes and sweeps and the noise's shift register
+  keep their values ([The reset line](#the-reset-line)).
 
-A write to the DMC's registers, `$4010-$4013`, is dropped. Each channel's level is in the state
-value as the last tick left it, `pulse[0].output`, `pulse[1].output`, `triangle.output` and
-`noise.output`; no sample is mixed from them. A program that loads pulse 1's counter and reads the
+Each channel's level is in the state value as the last tick left it, `pulse[0].output`,
+`pulse[1].output`, `triangle.output`, `noise.output` and `dmc.output`; no sample is mixed from
+them. A program that loads pulse 1's counter and reads the
 status back, then runs until the sequence's flag:
 
 ```cpp
@@ -388,6 +404,34 @@ for (int cycle = 47; cycle < 119; ++cycle) machine.step();
 The write to `$4003` in cycle 32 returns the sequencer to its first step. The timer, reloaded with
 8 in the cycle of the write to `$4002`, a get cycle, counts through 0 at cycle 46 and every 18
 cycles after, each time moving the sequencer a step.
+
+A program that starts a one-byte sample at the fastest rate and reads the status back:
+
+```cpp
+// LDA #$8F; STA $4010; LDA #$FC; STA $4012; LDA #$00; STA $4013; LDA #$10; STA $4015;
+// LDA $4015; STA $10; JMP $8019
+std::vector<std::uint8_t> image = nromImage({0xA9, 0x8F, 0x8D, 0x10, 0x40, 0xA9, 0xFC, 0x8D,
+                                             0x12, 0x40, 0xA9, 0x00, 0x8D, 0x13, 0x40, 0xA9,
+                                             0x10, 0x8D, 0x15, 0x40, 0xAD, 0x15, 0x40, 0x85,
+                                             0x10, 0x4C, 0x19, 0x80});
+image[16 + 0x3F00] = 0x5A;  // the sample's one byte, at $FF00 through the mirror
+neasant::Nes machine(neasant::NesConfig{.rom = image});
+for (int cycle = 0; cycle < 34; ++cycle) machine.step();
+// machine.state().cpu.rdyLine == true: the write landed in cycle 30 and the CPU runs on
+machine.step();  // cycle 34: the halt cycle, the read of $4015 repeated while the CPU is held
+// machine.state().cpu.rdyHeld == true and machine.state().dma.dmcStage == neasant::DmcStage::Dummy
+machine.step();  // cycle 35: the dummy cycle
+machine.step();  // cycle 36: the DMA unit reads $FF00
+// machine.state().apu.dmc.buffer == 0x5A and machine.state().apu.dmc.bytesRemaining == 0
+// machine.state().apu.dmc.interrupt == true: the one-byte sample ended with bit 7 of $4010 set
+for (int cycle = 37; cycle < 41; ++cycle) machine.step();
+// machine.state().ram[0x10] == 0x80: the read of $4015 made at cycle 37 sees the flag and no bytes
+```
+
+The write to `$4015` lands in cycle 30, a get cycle; the DMA unit halts the CPU on the fourth
+cycle after it, spends a dummy cycle and reads the byte on the sixth, and the CPU resumes on the
+seventh. The read of `$4015` is the instruction the CPU was halted on, made for real after the
+fetch.
 
 ## Stepping and running
 
@@ -440,11 +484,12 @@ half of the cycle (NESdev wiki, "CPU interrupts", Detailed interrupt behavior):
 | 3 | one: 3 | two: 7 and 11 |
 
 (NESdev wiki, "PPU frame timing", CPU-PPU Clock Alignment; "CPU pinout", M2.) The pattern repeats
-every cycle, twelve being a multiple of four. The access is the CPU's; while the OAM DMA unit
-holds the bus it is the unit's get or put, and on the unit's halt and alignment cycles the halted
-CPU repeats its read ([OAM DMA](#oam-dma)). Because the APU ticks after the access, a write to an
-APU register is seen by that cycle's tick, and a read of `$4015` answers what the previous
-cycle's tick left ([The APU](#the-apu)).
+every cycle, twelve being a multiple of four. The access is the CPU's; while the DMA unit holds
+the bus it is the OAM transfer's get or put or the DMC's fetch, and on the unit's halt, dummy and
+alignment cycles the halted CPU repeats its read
+([OAM DMA and the DMC's fetch](#oam-dma-and-the-dmcs-fetch)). Because the APU ticks after the
+access, a write to an APU register is seen by that cycle's tick, and a read of `$4015` answers
+what the previous cycle's tick left ([The APU](#the-apu)).
 
 ```cpp
 std::vector<std::uint8_t> image = nromImage({0x4C, 0x00, 0x80});
@@ -502,8 +547,8 @@ value, and everything else keeps what it held:
 | | After `reset()` |
 |---|---|
 | the CPU | the sequence pending: on the next seven cycles the program counter goes to the vector, S ends three lower and I is set; A, X, Y and the other flags keep their values; a jammed core is released; an instruction in progress is abandoned |
-| the APU | every channel disabled with its length counter at 0, the frame interrupt flag clear, the triangle's sequencer at its first step, the sequence restarting on the next cycle in the mode last written to `$4017`; the inhibit bit, the halt bits, the channels' registers, timers, envelopes and sweeps and the noise's shift register kept ([The APU](#the-apu)) |
-| the OAM DMA unit | a transfer under way ends and the CPU is released; the page latch keeps its byte |
+| the APU | every channel disabled with its length counter at 0, the DMC's sample stopped with its interrupt flag clear and its level's low bit kept, the frame interrupt flag clear, the triangle's sequencer at its first step, the sequence restarting on the next cycle in the mode last written to `$4017`; the inhibit bit, the halt bits, the channels' registers, timers, envelopes and sweeps, the noise's shift register and the DMC's buffer and output unit kept ([The APU](#the-apu)) |
+| the DMA unit | a transfer or a fetch under way ends and the CPU is released; the page latch keeps its byte |
 | the PPU | `$2000`, `$2001`, the temporary address, the fine X scroll, the write toggle and the read buffer cleared; the counter at dot 0 of scanline 0 of an even frame; the warm-up window open; the vertical-blank flag, the OAM address, the current address, the I/O bus and the memories kept ([the PPU page](ppu.md#the-reset-line)) |
 | work RAM, PRG RAM, CHR RAM, the open bus, the strobe, the shift registers, the pads, the master counters, the observers | what they held |
 
@@ -747,7 +792,7 @@ for (int cycle = 0; cycle < 7 + 12 + 8 * 7; ++cycle) machine.step();
 // machine.joypad(neasant::JoypadPort::Two).has_value() == false: an empty socket
 ```
 
-## OAM DMA
+## OAM DMA and the DMC's fetch
 
 A write to `$4014` names a page of the CPU's address space, and the OAM DMA unit copies its 256
 bytes to the PPU's object attribute memory through `$2004`. The unit halts the CPU through its RDY
@@ -762,7 +807,23 @@ ends the CPU makes that read for real (NESdev wiki, "DMA", Summary, Cadence, Beh
 and Register conflicts). A read-modify-write of `$4014` writes twice before the halt lands, and
 the copy is from the second page written (NESdev wiki, "DMA", OAM DMA).
 
-`DmaStage` is where the unit is in a transfer, and `Dma` is the unit's state:
+The DMC's reader asks the same unit for each byte of a sample (NESdev wiki, "DMA", DMC DMA). The
+unit takes the request in the cycle after it is made and halts the CPU through RDY on a read
+cycle: for the first byte of a sample, on the get cycle of the second APU cycle after the `$4015`
+write that started it, three cycles after a write on a put cycle and four after one on a get; for
+every later byte, in the cycle after the tick in which the output unit emptied the buffer, a put
+cycle. After the halt cycle comes a dummy cycle, then an alignment cycle when the next cycle is a
+put, then the get, which reads the byte through the bus in the DMC's name and delivers it to the
+buffer: three or four cycles, the halted CPU repeating its read on each but the get. A fetch that
+lands inside an OAM transfer takes its get and the transfer aligns again, two cycles in all; a
+fetch whose halt falls on the transfer's second-to-last put costs one cycle and one on its last
+put three (NESdev wiki, "DMA", DMC DMA during OAM DMA). A sample stopped in the two cycles before
+the output unit empties the buffer still brings the halt cycle, after which the unit finds nothing
+to fetch and releases the CPU; a write in the way of that halt brings nothing (NESdev wiki, "DMA",
+Bugs).
+
+`DmaStage` is where the unit is in a transfer, `DmcStage` where it is in a fetch, and `Dma` is the
+unit's state:
 
 ```cpp
 enum class DmaStage : std::uint8_t {
@@ -772,6 +833,13 @@ enum class DmaStage : std::uint8_t {
   Put,   // this cycle writes the byte read to $2004
 };
 
+enum class DmcStage : std::uint8_t {
+  Idle,   // no fetch
+  Halt,   // the fetch is taken: the unit waits out a load's delay, then holds RDY low until a read cycle halts the CPU
+  Dummy,  // the cycle after the halt cycle: the unit makes no access
+  Get,    // the next get cycle reads the sample byte; a put cycle before it is an alignment cycle
+};
+
 struct Dma {
   // The page a transfer copies from: the byte most recently written to $4014 (NESdev
   // wiki, "DMA", OAM DMA).
@@ -779,10 +847,15 @@ struct Dma {
   DmaStage stage = DmaStage::Idle;
   std::uint8_t index = 0;  // the byte of the page the next get reads
   std::uint8_t byte = 0;   // the byte the last get read, carried to its put
-  // Whether the DMC has a sample byte to fetch, whose get takes precedence over the OAM
-  // unit's and pauses it (NESdev wiki, "DMA", DMC DMA during OAM DMA). The DMC is not
-  // built, so nothing sets it.
-  bool dmcRequested = false;
+  // The DMC fetch the unit is carrying out, taken from the APU's reader in the cycle after
+  // it asked, and where the unit is in it. The fetch's get takes precedence over the OAM
+  // unit's and pauses the transfer (NESdev wiki, "DMA", DMC DMA during OAM DMA).
+  DmcFetch dmc = DmcFetch::None;
+  DmcStage dmcStage = DmcStage::Idle;
+  // Cycles before a load's halt is attempted: the get cycle of the second APU cycle after
+  // the $4015 write, two cycles on from the get cycle after the write and three from a
+  // put (NESdev wiki, "DMA", DMC DMA).
+  std::uint8_t dmcDelay = 0;
   [[nodiscard]] bool operator==(const Dma&) const noexcept = default;
 };
 ```
@@ -794,14 +867,16 @@ struct Dma {
 | `Get` on a put cycle | an alignment cycle: the halted read, repeated | `Get` |
 | `Get` on a get cycle | the unit reads the page's next byte | `Put` |
 | `Put` | the unit writes the byte to `$2004` | `Get`, or `Idle` after the 256th with RDY raised |
+| the DMC `Halt` with its delay at 0 | RDY low with the OAM unit's own halt or hold, then the cycle: a write proceeds; a read, or an OAM access with the CPU held, is the DMC's halt cycle | `Dummy` once the CPU is held, else `Halt` |
+| the DMC `Dummy` | no access by the DMC: the OAM unit's access, or the halted read | `Get` |
+| the DMC `Get` on a put cycle | an alignment cycle: the OAM unit's access, or the halted read | `Get` |
+| the DMC `Get` on a get cycle | the DMC reads the sample byte, whatever the OAM unit was about to do | `Idle`, with RDY raised when the OAM unit is idle |
 
 (NESdev wiki, "DMA", Behavior, Cadence and OAM DMA.) The unit's accesses go through the bus as the
 CPU's would, in the unit's name, so a bus observer is told them with `AccessSource::OamDma`
 ([The bus observer](#the-bus-observer)). The NMI line is sampled at the end of every cycle, so an
 edge during a transfer is taken after the halted instruction, and `reset()` ends a transfer under
-way. `Dma::dmcRequested` and `AccessSource::DmcDma` are declared and nothing drives them: the
-DMC's fetch and its precedence over this unit (NESdev wiki, "DMA", DMC DMA during OAM DMA) are
-the DMC's, which is not built.
+way.
 
 ```cpp
 // LDA #$02; STA $4014; NOP
@@ -864,7 +939,7 @@ class BusObserver {
 |---|---|
 | `Cpu` | the core, every cycle of its own, the cycles it is halted on included: a read it repeats carries `CycleKind::Halted` |
 | `OamDma` | the OAM DMA unit's gets and puts, plain data reads and writes |
-| `DmcDma` | the DMC's sample fetch; the DMC is not built, so no access carries it |
+| `DmcDma` | the DMC's sample fetch, one data read a byte, through the bus as the CPU's would go |
 
 (NESdev wiki, "DMA", Behavior.) The report is made inside the cycle, after the access settles and
 before the dots that follow it, so a register's read side effect has happened when the read is
@@ -1102,21 +1177,28 @@ for (int n = 0; n < 3; ++n) {
 The machine runs the CPU's self-checking test programs, blargg's eight suites as the
 `christopherpow/nes-test-roms` repository collects them: `instr_test-v5`, `instr_timing`,
 `instr_misc`, `cpu_dummy_reads`, `cpu_dummy_writes`, `cpu_exec_space`, `cpu_reset` and
-`branch_timing_tests`, 36 ROM files. It runs the APU frame counter's programs from the same
-repository: `apu_test` 1–6, `apu_reset`, `blargg_apu_2005.07.30` and `cpu_interrupts_v2`, 30 ROM
-files. Each is booted on a machine built with the config's defaults and run one frame at a time
-until it reports. The newer programs report a status byte at `$6000` with a signature at
-`$6001-$6003` and their text from `$6004`, read out of `state().prgRam`; the older ones,
-`cpu_dummy_reads`, `branch_timing_tests` and the 2005 APU set, print their result on the screen,
-read out of `state().ppu.ciram`, the 2005 set as a result code, `$01` a pass. A program that asks
-for the reset button gets the reset line seven frames later.
+`branch_timing_tests`, 36 ROM files. It runs the APU's programs from the same repository:
+`apu_test`, `apu_reset`, `blargg_apu_2005.07.30`, `cpu_interrupts_v2`, `dmc_dma_during_read4`,
+`sprdma_and_dmc_dma` and `dmc_tests`, 43 ROM files, and Fiskbit's two `dmc_dma_start_test`
+programs and Damian Yerrick's `dpcmletterbox` from their own archives. Each is booted on a
+machine built with the config's defaults and run one frame at a time until it reports. The
+newer programs report a status byte at `$6000` with a signature at `$6001-$6003` and their text
+from `$6004`, read out of `state().prgRam`; the older ones, `cpu_dummy_reads`,
+`branch_timing_tests`, the 2005 APU set and the DMC DMA programs, print their result on the
+screen, read out of `state().ppu.ciram`, the 2005 set as a result code, `$01` a pass. A program
+that asks for the reset button gets the reset line seven frames later.
 
 Of the CPU's 36, 32 pass and four, the multi-test builds on mapper 1 whose sub-tests run from the
 singles, register and skip naming the mapper. `cpu_dummy_reads` names mapper 3 with one bank and
 runs as NROM under the config's mapper override. `test_cpu_exec_space_apu` passes with the
-cartridge range from `$4020` floating as NROM leaves it. Of the APU's 30, 27 pass; `apu_test.nes`
-and `cpu_interrupts.nes`, the multi-test builds on mapper 1, skip naming the mapper, and
-`works_immediately` skips naming the DMC's two status bits, which it reads. `2-nmi_and_brk`,
+cartridge range from `$4020` floating as NROM leaves it. Of the APU's 43, 36 pass; `apu_test.nes`
+and `cpu_interrupts.nes`, the multi-test builds on mapper 1, skip naming the mapper;
+`double_2007_read`, which reads `$2007` on two adjacent cycles with no DMA, skips naming the PPU's
+port; `dmc_tests`'s four, which carry no readme or source, skip naming the description they lack.
+`dpcmletterbox`, whose NMI handler waits for the sprite 0 hit before it starts its sample, skips
+naming it. Fiskbit's 21 cases are measured through the bus observer as the cycles between the two
+`$2001` writes that bound each greyscale region and the deleted-bit counters in RAM, and every one
+gives the figure his readme measures on an RP2A03H. `2-nmi_and_brk`,
 whose readme says it "occasionally fails on NES due to PPU-CPU synchronization", passes under
 alignment 0, the default, and fails under 1, 2 and 3. Every APU program passes under either
 `apuPhase`.
@@ -1128,6 +1210,10 @@ cmake -B build -DNEASANT_NES_TEST_ROMS=/path/to/nes-test-roms
 cmake --build build
 ctest --test-dir build
 ```
+
+`NEASANT_DMC_PROGRAMS_DIR` points at a directory holding `dmc_dma_start_test/`,
+`dmc_dma_start_test_v2/` and `dpcmletterbox/`, each with its ROM, and
+`NEASANT_REQUIRE_DMC_PROGRAMS=1` turns their skips into failures as the other variable does.
 
 Without that path every program case registers and skips, naming the option, and the hand cases
 run regardless; with the path and a file absent, the case skips naming the file.
@@ -1159,6 +1245,10 @@ The hand-derived suites, by executable:
   counter and the counters that stop it, the noise's shift register in both modes and its period
   table, the quarter- and half-frame clocks on those units, reset and the enables, driven through
   `apu.h` and on the machine.
+- `apu_dmc_test` — the DMC's registers, reader, output unit, timer, interrupt and reset driven
+  through `apu.h`; the load's third or fourth cycle, the reload's four, a write in the halt's way,
+  the fetch inside and at the end of an OAM transfer and the one abandoned after its halt cycle,
+  counted through the bus observer on the machine; and the APU's DMC programs above.
 
 Every value they assert is read from a document named under [Sources](#sources).
 
@@ -1177,8 +1267,11 @@ Every value they assert is read from a document named under [Sources](#sources).
   is read or `$4017` is written with bit 6 set; a program that clears I without doing either is
   interrupted.
 - **The APU's sound is its channels' levels.** `state().apu` holds the level each pulse, the
-  triangle and the noise feeds its DAC, cycle by cycle; no sample is mixed from them, and the DMC's
-  registers are dropped.
+  triangle, the noise and the DMC feeds its DAC, cycle by cycle; no sample is mixed from them.
+- **The DMC halts the CPU anywhere.** Each sample byte costs three or four cycles on a read cycle
+  of the CPU's choosing, and a read of `$2002`, `$2007`, `$4015`, `$4016` or `$4017` the halt
+  lands on is repeated on every halted cycle: `$2007` steps its address two or three extra times
+  and a pad loses a bit.
 - **Set the pad before the frame that reads it.** A pad changed after the strobe's fall is seen
   when the register next fills.
 - **An empty port and a pad with nothing pressed differ.** 0 on every read, against 0 eight times
@@ -1214,8 +1307,9 @@ by the documents the machine is built from.
    since a read always follows a write before an undriven read.
 4. **The 2A03's register decode while the CPU is halted.** The "DMA" page has the 2A03 decode bits
    4–0 from its own address bus and bits 15–5 from the core's; the machine decodes the OAM DMA
-   unit's address whole. The case arises only for a program executing from `$4000-$401F`, since
-   OAM DMA's halt lands on an opcode fetch; the DMC, which halts anywhere, is not built.
+   unit's address whole. The case arises for a program executing from `$4000-$401F` under OAM
+   DMA, and for a DMC fetch whose address's low five bits name a register the halted CPU is
+   reading, `$4015`, `$4016` or `$4017`; the machine reads the sample byte whole either way.
 5. **`$4018-$401F`.** The "2A03" page names the range's test mode and its unfinished timer; the
    machine answers the open bus to a read and lands no write there.
 6. **The console's clock line for the pads.** The "DMA" page has the RF Famicom clock a pad on
@@ -1228,10 +1322,18 @@ by the documents the machine is built from.
    blargg's instruction test, which fixes `$FF` for `LXA` on the unit it was generated on; the
    suite does not test `ANE`, and no document the machine is built from states the 2A03's value
    for either. The config states `$FF` for both.
-9. **The DMC.** `AccessSource::DmcDma` and `Dma::dmcRequested` are declared and nothing drives
-   them: the DMC's fetch, its precedence over OAM DMA ("DMA", DMC DMA during OAM DMA) and the
-   double clock it gives a pad ("Controller reading", DPCM conflict) are the DMC's, which is not
-   built.
+9. **The DMC where the documents are silent or differ.** The "DMA" page's unexpected reload on
+   the RP2A03H and late RP2A03G, a sample ending implicitly in the APU cycle its reload would
+   schedule in, is not modelled, and the page is silent on an explicit stop there: the machine
+   fetches nothing in either case. The "APU DMC" page's `$4011` write that lands with the output
+   unit's clock and is "occasionally not changed properly" is a direct load on the machine. Visual
+   2A03 has the bytes remaining, the active bit and the interrupt flag change three cycles after
+   the fetch, where blargg's `7-dmc_basics`, `dma_2007_read` and `sprdma_and_dmc_dma`, measured on
+   a console, require a `$4015` read two cycles after it to see the new bits; the machine changes
+   them at the fetch. The machine's `$2007` read on adjacent cycles is two full reads, where the
+   hardware's `double_2007_read` and `dma_2007_read` differ by alignment; that is the PPU's port.
+   At power-on the DMC's timer, an LFSR in an arbitrary state on the chip, reloads at the first
+   tick.
 10. **The channels where the documents are silent or differ.** The "CPU power up state" page marks
     the triangle's place in its sequence at power-on unknown; the machine starts it at its first
     step, level 15, where the source of blargg's `apu_mixer` programs has it start. The same page
@@ -1258,14 +1360,15 @@ by the documents the machine is built from.
   `Nes`.
 - `include/neasant/nes/clock.h` — `Region`, `ConsoleClock` and `FrameDeadline`.
 - `include/neasant/apu/apu.h` — `ApuState` with its length counters, envelopes, sweeps, pulses,
-  triangle and noise, and the functions the machine calls: the write, the status read, the tick,
-  the IRQ output and the reset.
+  triangle, noise and DMC, and the functions the machine calls: the write, the status read, the
+  tick, the IRQ output, the reset, and the DMC's fetch request and delivery.
 - `src/nes/nes.cpp` — the button names, construction, the decode, the bus with open bus, the
-  controller ports' clock lines, the OAM DMA unit, the machine cycle, `step` and `run`, `reset`
+  controller ports' clock lines, the DMA unit's OAM transfer and DMC fetch, the machine cycle,
+  `step` and `run`, `reset`
   and `restore`.
 - `src/apu/apu.cpp` — the length table, the frame counter's steps and its restart, the quarter-
   and half-frame clocks, the duty, triangle and noise period tables, the timers and each channel's
-  level.
+  level, the DMC's rate table, its reader and its output unit.
 - `tests/nes/` — the five hand-derived suites, the authored-image helper, and the test-ROM
   harness with its suite; `tests/apu/` — the APU's suites.
 
@@ -1273,20 +1376,26 @@ by the documents the machine is built from.
 
 - **NESdev wiki** — the pages "CPU memory map", "2A03", "Open bus behavior", "CPU", "CPU power up
   state", "CPU pinout", "CPU interrupts", "DMA", "APU", "APU Frame Counter", "APU Length
-  Counter", "APU Envelope", "APU Pulse", "APU Triangle", "APU Noise", "Controller reading", "Standard controller", "PPU frame timing" and "PPU power up
-  state", at `https://www.nesdev.org/wiki/`.
+  Counter", "APU Envelope", "APU Pulse", "APU Triangle", "APU Noise", "APU DMC", "Controller
+  reading", "Standard controller", "PPU frame timing" and "PPU power up state", at
+  `https://www.nesdev.org/wiki/`.
 - **2A03 technical reference** — Brad Taylor, *2A03 technical reference* (2004).
 - **NES APU Sound Hardware Reference** — blargg, `apu_ref.txt` (2004), "blargg's NES APU
   reference" above.
 - **Visual 2A03** — the transistor-level simulation of the RP2A03 at
   `http://www.qmtpro.com/~nes/chipimages/visual2a03/`, read as a measurement of the chip: the half
   of the APU cycle the pulses' and the noise's units change in, a sweep's wait on its length
-  counter, and the cycle of the clocks a `$4017` write makes.
+  counter, the cycle of the clocks a `$4017` write makes, and the DMC's timer, output unit and
+  fetch.
 - **64doc** and **No More Secrets** — as the [CPU page](6502-cpu.md#sources) names them, for the
   constant `ANE` and `LXA` OR into A.
 - **The test programs** — blargg's CPU suites and his APU, reset, frame-counter and interrupt
-  programs as the `christopherpow/nes-test-roms` repository at
-  `https://github.com/christopherpow/nes-test-roms` collects them, with their readmes and sources;
-  the reference data the program suites run. The 2005 set's readme, "blargg's 2005 frame counter
-  readme" above, and `apu_reset`'s readme are published measurements of the console. The shell of
-  his `apu_mixer` programs states the triangle's level at power-on.
+  programs, his `dmc_dma_during_read4` and `sprdma_and_dmc_dma` programs, as the
+  `christopherpow/nes-test-roms` repository at `https://github.com/christopherpow/nes-test-roms`
+  collects them, with their readmes and sources, the second described in his post of 2010-06-08,
+  "DMA operation in APU", at `https://forums.nesdev.org/viewtopic.php?p=62690`; Fiskbit's
+  `dmc_dma_start_test` and `dmc_dma_start_test_v2` with their readmes and sources, and Damian
+  Yerrick's `dpcmletterbox` with its source; the reference data the program suites run. The 2005
+  set's readme, "blargg's 2005 frame counter readme" above, and `apu_reset`'s readme are published
+  measurements of the console. The shell of his `apu_mixer` programs states the triangle's level
+  at power-on.

@@ -133,3 +133,17 @@ target_compile_definitions(apu_frame_test PRIVATE
 # tests'.
 neasant_add_test(apu_channels_test apu/channels_test.cpp)
 target_include_directories(apu_channels_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
+
+# The DMC: its registers, the reader's restart, address and count, the output unit's level
+# steps and clamps, the rate table and the timer's half, the loop, the interrupt flag with
+# its two clears and the IRQ line, the request that lapses, reset; on the machine the load's
+# halt on the third or fourth cycle, a write delaying it, the reload's four cycles, the
+# interrupt reaching the CPU, the fetch inside an OAM transfer and at its end, the fetch
+# abandoned after its halt cycle, reset and a snapshot mid-fetch; and blargg's and Fiskbit's
+# DMC programs on the machine, read out of the state value and through the bus observer.
+# The harness and the authored-image helpers are the machine tests'.
+neasant_add_test(apu_dmc_test apu/dmc_test.cpp nes/rom_harness.cpp)
+target_include_directories(apu_dmc_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
+target_compile_definitions(apu_dmc_test PRIVATE
+  NEASANT_NES_TEST_ROMS="${NEASANT_NES_TEST_ROMS}"
+  NEASANT_DMC_PROGRAMS_DIR="${NEASANT_DMC_PROGRAMS_DIR}")
