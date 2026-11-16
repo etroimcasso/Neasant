@@ -33,16 +33,16 @@ embeddable. Pronounced "NESn't," like Peasant with an N.
 ## What is built
 
 The CPU, the machine around it and the cartridge are built and documented; the PPU holds its
-register file and frame timing with no picture, the APU its frame counter, length counters and
-five channels with no samples, and NROM is the one board. This
-table gains a row's link and description as each component lands.
+register file and frame timing with no picture, the APU its frame counter, length counters, five
+channels and mixer, drained as samples, and NROM is the one board. This table gains a row's
+link and description as each component lands.
 
 | Component | Status |
 |---|---|
 | [6502 CPU core](docs/6502-cpu.md) | **complete** — 256 opcodes, cycle-stepped, every cycle checked against the SingleStepTests nes6502 vectors; the reset, interrupt and RDY-halt sequences cycle by cycle |
 | [Machine (bus, RAM, cartridge boundary, controllers)](docs/nes-machine.md) | **complete** — the master-cycle budget, the console's bus and open bus, the two controller ports, OAM DMA, the bus and save observers, snapshot and restore; the CPU's self-checking test programs pass on it |
 | [PPU](docs/ppu.md) | **in progress** — the register file, the frame's timing and the NMI, with no picture |
-| APU ([the machine page's section](docs/nes-machine.md#the-apu)) | **in progress** — the frame counter with its interrupt on the CPU's IRQ line, the length counters, the status register, the pulse, triangle and noise channels and the DMC with its sample fetch through the DMA unit, each channel down to the level it feeds its DAC, with no samples; blargg's APU and DMC test programs pass |
+| APU ([the machine page's section](docs/nes-machine.md#the-apu)) | **in progress** — the frame counter with its interrupt on the CPU's IRQ line, the length counters, the status register, the pulse, triangle and noise channels and the DMC with its sample fetch through the DMA unit, the mixer over the five channels' levels and the samples a host drains at the rate it names; blargg's APU, DMC and mixer test programs pass |
 | [Mappers](docs/nes-cartridge.md) | **in progress** — the cartridge as a value, the pin-level board boundary, NROM |
 | Peripherals | **not started** |
 | Player | **not started** |

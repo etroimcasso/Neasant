@@ -8,12 +8,13 @@
 // with its envelope and its shift register, and the DMC with its memory reader, its
 // sample buffer, its output unit and its interrupt flag, each channel answering the
 // level its DAC takes; the status register's read and write; the IRQ line the two
-// interrupt flags drive; power-on and reset; and the seam the DMC's sample fetch takes
-// through the machine's DMA unit. The mixer and the decimator are absent: no sample is
-// made from the levels.
+// interrupt flags drive; power-on and reset; the seam the DMC's sample fetch takes
+// through the machine's DMA unit; the mixer, which makes one output level of the five;
+// and the decimator, which averages that level down to the samples a host drains.
 
 #include <array>
 #include <cstdint>
+#include <optional>
 
 namespace neasant {
 
@@ -219,13 +220,38 @@ struct ApuDmc {
   [[nodiscard]] bool operator==(const ApuDmc&) const noexcept = default;
 };
 
+// Where the chip's output stands in the sample under way (apuDecimate). Time is counted
+// in units of 1 / (236 250 000 times the output rate) of a second: a CPU cycle is 132
+// times the rate of them and a sample is 236 250 000 (NESdev wiki, "CPU", Frequencies:
+// the CPU clock is 236 250 000 / 132 Hz).
+struct ApuDecimator {
+  // The time run since the last sample was made, in those units; below 236 250 000
+  // between calls.
+  std::uint32_t elapsed = 0;
+  // The output level summed over the CPU cycles since the last sample, and the count of
+  // those cycles.
+  std::int64_t sum = 0;
+  std::uint32_t count = 0;
+  [[nodiscard]] bool operator==(const ApuDecimator&) const noexcept = default;
+};
+
+// What the chip's output reaches and does not hold: the rate its level is decimated to,
+// in samples a second, from the machine's config, 0 making no samples; and the level the
+// cartridge's sound hardware adds to the chip's, in a sample's units, 0 for a cartridge
+// with none.
+struct ApuInputs {
+  std::uint32_t audioRate = 0;
+  std::int16_t expansion = 0;
+};
+
 // The chip's whole mutable state as a value: snapshot by copy, restore by assignment.
 // The defaults are the power-on state (NESdev wiki, "CPU power up state", APU): every
 // register 0 and every channel disabled with its counter at 0, the triangle at its first
 // step, the noise's shift register 1, the DMC silent with its level 0, mode 0 with the
 // interrupt enabled, the flag clear, and the sequence restarting at the first machine
 // cycle's tick, which puts its origin nine cycles before the first instruction, the
-// figure blargg's apu_reset programs measure as usual.
+// figure blargg's apu_reset programs measure as usual; the output's first sample not yet
+// begun.
 struct ApuState {
   // Pulse 1, pulse 2, the triangle and the noise, in $4015's bit order.
   std::array<ApuLengthCounter, 4> length{};
@@ -263,6 +289,8 @@ struct ApuState {
   // "APU Frame Counter", Control register; Visual 2A03). Until the restart the counter
   // keeps stepping in its old mode.
   std::uint8_t restartDelay = 1;
+  // The output's place in its current sample. Reset leaves it as it is.
+  ApuDecimator decimator{};
   [[nodiscard]] bool operator==(const ApuState&) const noexcept = default;
 };
 
@@ -271,9 +299,9 @@ struct ApuState {
 // frame interrupt flag clear, the sequence restarting at the next tick in the mode last
 // written to $4017, the triangle's sequencer at its first step, and the pulses and the
 // noise silent. The inhibit bit, every halt bit, every channel register, every timer,
-// envelope and sweep, the noise's shift register and the DMC's buffer and output unit
-// are kept (NESdev wiki, "CPU power up state", APU, the After Reset column; "APU",
-// Status; "APU Noise", Operation).
+// envelope and sweep, the noise's shift register, the DMC's buffer and output unit and
+// the decimator are kept (NESdev wiki, "CPU power up state", APU, the After Reset column;
+// "APU", Status; "APU Noise", Operation).
 void apuReset(ApuState& state) noexcept;
 
 // A CPU write to `address`, one of $4000-$4013, $4015 or $4017, in a cycle whose APU
@@ -339,5 +367,30 @@ void apuTickCycle(ApuState& state, std::uint8_t apuPhase) noexcept;
 // restarts from $4012 and $4013 while $4010 bit 6 is set, and otherwise ends, setting the
 // interrupt flag while $4010 bit 7 is set (NESdev wiki, "APU DMC", Memory reader).
 void apuDmcDeliver(ApuState& state, std::uint8_t byte) noexcept;
+
+// The level the chip's output takes, 0 to 32 767, from the level each channel's DAC
+// takes. The two pulses go through one curve, 95.88 / (8128 / (pulse 1 + pulse 2) + 100),
+// and the triangle, the noise and the DMC through another, 159.79 / (1 / (triangle /
+// 8227 + noise / 12241 + dmc / 22638) + 100), a group whose channels all stand at 0
+// adding 0. The two curves together run from 0.0 to 1.0; each one's value is scaled by
+// 32 767 and rounded to the nearest whole number, a half upward, and the two are added
+// (NESdev wiki, "APU Mixer"). Each curve flattens as its group's levels rise, so the
+// DMC's level sets how far a step of the triangle or the noise moves the output.
+// `expansion` is added to the sum, which is held at 32 767, the most a sample holds. The
+// level is the DACs' own: 0 with every channel at 0, and the console's output filters
+// are left to the host.
+[[nodiscard]] std::int16_t apuMix(const ApuState& state, std::int16_t expansion) noexcept;
+
+// One CPU cycle of the chip's output, called after the cycle's tick: adds the level
+// apuMix answers to the sample under way and moves the decimator on by the cycle, 132
+// times the rate; when that completes a sample's 236 250 000 it answers the sample, the
+// sum divided by the count of cycles it spans with the fraction dropped, and begins the
+// next with the time left over. A sample is thus the mean of the level over the cycles
+// it spans, 37 or 38 of them at 48 000 Hz, and the first N cycles from power-on make the
+// whole part of N times the rate times 132 / 236 250 000 samples. A rate of 0 answers
+// nothing and leaves the state as it is; the rate is at most the CPU clock's 1 789 772,
+// a sample a cycle.
+[[nodiscard]] std::optional<std::int16_t> apuDecimate(ApuState& state,
+                                                      const ApuInputs& inputs) noexcept;
 
 }  // namespace neasant

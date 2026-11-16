@@ -186,6 +186,8 @@ void Nes::restore(const NesState& state) {
   }
   state_ = state;
   cpu_.restore(state.cpu);
+  // The frames queued belong to the run the restore replaces.
+  frames_.clear();
   reportSave();
 }
 
@@ -208,6 +210,7 @@ void Nes::reset() {
   // PPU with the CPU.
   ppuReset(state_.ppu);
   state_.cpu = cpu_.state();
+  frames_.clear();
 }
 
 std::uint64_t Nes::step() {
@@ -234,6 +237,21 @@ void Nes::setJoypad(JoypadPort port, std::optional<Joypad> pad) noexcept {
 
 const std::optional<Joypad>& Nes::joypad(JoypadPort port) const noexcept {
   return state_.pads[static_cast<std::size_t>(port)];
+}
+
+std::vector<std::int16_t> Nes::takeFrames() {
+  // The queue is copied out and emptied, keeping its storage for the frames to come.
+  std::vector<std::int16_t> frames(frames_.begin(), frames_.end());
+  frames_.clear();
+  return frames;
+}
+
+std::size_t Nes::takeFrames(std::span<std::int16_t> into) noexcept {
+  const std::size_t count = std::min(into.size(), frames_.size());
+  const auto end = frames_.begin() + static_cast<std::ptrdiff_t>(count);
+  std::copy(frames_.begin(), end, into.begin());
+  frames_.erase(frames_.begin(), end);
+  return count;
 }
 
 std::size_t Nes::saveDataSize() const noexcept {
@@ -542,10 +560,10 @@ void Nes::busCycle() {
 bool Nes::machineCycle() {
   // The dots whose master cycle falls before M2 rises, then the cycle's one access,
   // then the dots that fall after it, which a read of $2002 under way is told (NESdev
-  // wiki, "PPU frame timing", VBL Flag Timing), then the APU's tick, then the two lines as
-  // the CPU samples them at the cycle's end (NESdev wiki, "CPU interrupts", Detailed
-  // interrupt behavior: the edge and level detectors sample during the second half of
-  // each cycle).
+  // wiki, "PPU frame timing", VBL Flag Timing), then the APU's tick and a cycle of its
+  // output, then the two lines as the CPU samples them at the cycle's end (NESdev wiki,
+  // "CPU interrupts", Detailed interrupt behavior: the edge and level detectors sample
+  // during the second half of each cycle).
   const std::uint64_t access = state_.master + kMasterCyclesToM2Rise;
   const std::uint64_t end = state_.master + kMasterCyclesPerCpuCycle;
   bool frameEnded = false;
@@ -560,6 +578,12 @@ bool Nes::machineCycle() {
     state_.dotClock += kMasterCyclesPerDot;
   }
   apuTickCycle(state_.apu, state_.apuPhase);
+  // The output takes the level the tick left; the cartridge's level is 0, NROM carrying
+  // no sound hardware.
+  if (const std::optional<std::int16_t> sample =
+          apuDecimate(state_.apu, ApuInputs{.audioRate = audioRate_, .expansion = 0})) {
+    frames_.push_back(*sample);
+  }
   cpu_.setNmiLine(ppuNmiAsserted(state_.ppu));
   cpu_.setIrqLine(apuIrqAsserted(state_.apu));
   state_.master = end;

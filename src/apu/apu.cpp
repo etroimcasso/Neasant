@@ -69,6 +69,30 @@ constexpr std::uint8_t kDmcLevelFloor = 1;
 constexpr std::uint16_t kPeriodFloor = 8;
 constexpr int kPeriodCeiling = 0x7FF;
 
+// The mixer's two curves in whole numbers (NESdev wiki, "APU Mixer"): the pulses' 95.88 /
+// (8128 / n + 100) is 9588 n / (100 (8128 + 100 n)), and the other group's 159.79 / (1 / s
+// + 100), with s the sum of triangle / 8227, noise / 12241 and dmc / 22638 over their
+// common denominator, is 15979 N / (100 (D + 100 N)), N the three levels weighted by the
+// other two divisors' product and D the product of all three. Scaled by 32 767, the
+// largest numerator, every channel at its top, is below 2 to the 64th.
+constexpr std::uint64_t kPulseNumerator = 9588;
+constexpr std::uint64_t kPulseDivisor = 8128;
+constexpr std::uint64_t kTndNumerator = 15979;
+constexpr std::uint64_t kTriangleWeight = 12241ull * 22638ull;
+constexpr std::uint64_t kNoiseWeight = 8227ull * 22638ull;
+constexpr std::uint64_t kDmcWeight = 8227ull * 12241ull;
+constexpr std::uint64_t kTndDivisor = 8227ull * 12241ull * 22638ull;
+
+// The level the curves' 1.0 is scaled to, which is also the most a sample holds.
+constexpr std::uint64_t kFullScale = 32767;
+
+// The decimator's units (NESdev wiki, "CPU", Frequencies): the master clock is
+// 236 250 000 / 11 Hz and a CPU cycle twelve of its cycles, 132 / 236 250 000 of a
+// second, so in units of 1 / (236 250 000 times the rate) of a second a cycle is 132 times
+// the rate and a sample 236 250 000.
+constexpr std::uint32_t kSamplePeriod = 236250000;
+constexpr std::uint32_t kCyclePeriodPerHertz = 132;
+
 // The triangle's and the noise's places among the length counters, $4015's bit order.
 constexpr std::size_t kTriangleChannel = 2;
 constexpr std::size_t kNoiseChannel = 3;
@@ -550,6 +574,43 @@ void apuDmcDeliver(ApuState& state, std::uint8_t byte) noexcept {
     dmc.stopAge = 0;
     if (dmc.irqEnable) dmc.interrupt = true;
   }
+}
+
+std::int16_t apuMix(const ApuState& state, std::int16_t expansion) noexcept {
+  // NESdev wiki, "APU Mixer": output = pulse_out + tnd_out, each group 0 when its channels
+  // are all 0, which the whole-number form gives without a division by 0. Half the divisor
+  // is added before the division, so each value rounds to the nearest.
+  const std::uint64_t pulses =
+      std::uint64_t{state.pulse[0].output} + std::uint64_t{state.pulse[1].output};
+  const std::uint64_t pulseDivisor = 100 * (kPulseDivisor + 100 * pulses);
+  const std::uint64_t pulseLevel =
+      (kFullScale * kPulseNumerator * pulses + pulseDivisor / 2) / pulseDivisor;
+  const std::uint64_t weighted = std::uint64_t{state.triangle.output} * kTriangleWeight +
+                                 std::uint64_t{state.noise.output} * kNoiseWeight +
+                                 std::uint64_t{state.dmc.output} * kDmcWeight;
+  const std::uint64_t tndDivisor = 100 * (kTndDivisor + 100 * weighted);
+  const std::uint64_t tndLevel =
+      (kFullScale * kTndNumerator * weighted + tndDivisor / 2) / tndDivisor;
+  // The chip's own level is 0 or above, so the sum with the cartridge's stays within a
+  // sample's range below and is held at its top.
+  const int sum = static_cast<int>(pulseLevel + tndLevel) + expansion;
+  return static_cast<std::int16_t>(sum > static_cast<int>(kFullScale)
+                                       ? static_cast<int>(kFullScale)
+                                       : sum);
+}
+
+std::optional<std::int16_t> apuDecimate(ApuState& state, const ApuInputs& inputs) noexcept {
+  if (inputs.audioRate == 0) return std::nullopt;
+  ApuDecimator& decimator = state.decimator;
+  decimator.sum += apuMix(state, inputs.expansion);
+  ++decimator.count;
+  decimator.elapsed += kCyclePeriodPerHertz * inputs.audioRate;
+  if (decimator.elapsed < kSamplePeriod) return std::nullopt;
+  decimator.elapsed -= kSamplePeriod;
+  const auto sample = static_cast<std::int16_t>(decimator.sum / decimator.count);
+  decimator.sum = 0;
+  decimator.count = 0;
+  return sample;
 }
 
 }  // namespace neasant

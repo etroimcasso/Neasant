@@ -147,3 +147,15 @@ target_include_directories(apu_dmc_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
 target_compile_definitions(apu_dmc_test PRIVATE
   NEASANT_NES_TEST_ROMS="${NEASANT_NES_TEST_ROMS}"
   NEASANT_DMC_PROGRAMS_DIR="${NEASANT_DMC_PROGRAMS_DIR}")
+
+# The APU's output: the mixer's level for each channel alone and together against the mixer
+# page's two formulas, the cartridge's level added and held at a sample's top; the
+# decimator's 37 and 38 cycles a sample at 48 000 Hz, its mean, its highest rate and a rate
+# of 0; on the machine the level a write leaves in the first frame, the frames of a picture,
+# the two drains, the frames a restore and a reset discard, a copy's frames and two machines'
+# equal frames; and blargg's mixer programs on the machine, each measured in its drained
+# frames. The harness and the authored-image helpers are the machine tests'.
+neasant_add_test(apu_mixer_test apu/mixer_test.cpp nes/rom_harness.cpp)
+target_include_directories(apu_mixer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
+target_compile_definitions(apu_mixer_test PRIVATE
+  NEASANT_NES_TEST_ROMS="${NEASANT_NES_TEST_ROMS}")
