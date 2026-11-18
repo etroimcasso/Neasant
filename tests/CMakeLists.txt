@@ -159,3 +159,20 @@ neasant_add_test(apu_mixer_test apu/mixer_test.cpp nes/rom_harness.cpp)
 target_include_directories(apu_mixer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
 target_compile_definitions(apu_mixer_test PRIVATE
   NEASANT_NES_TEST_ROMS="${NEASANT_NES_TEST_ROMS}")
+
+# The console's output stage: the level it holds at power-on, one cycle's move of each
+# filter, a step's rise and decay, a standing level settling to 0, a fall, a square wave's
+# sag, the answer held within a sample and the reset keeping the stage, driven through
+# apu.h; on the machine an idle program's silence, the stage in a snapshot, across a reset
+# and at a rate of 0. The authored-image helpers are the machine tests'.
+neasant_add_test(apu_filter_test apu/filter_test.cpp)
+target_include_directories(apu_filter_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
+
+# The render tool: the WAV writer's header byte by byte for no samples and for some, at
+# two rates, and its samples in order, low byte first; and a cartridge rendered as
+# nes_render renders it: the run queueing exactly the samples asked for at four rates, the
+# same bytes from the same image twice, and an authored beep whose period is the one its
+# registers set. The authored-image helpers are the machine tests'.
+neasant_add_test(render_test tools/render_test.cpp)
+target_link_libraries(render_test PRIVATE neasant_render)
+target_include_directories(render_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)

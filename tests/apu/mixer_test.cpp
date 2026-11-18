@@ -22,13 +22,14 @@
 
 // The APU's output: the mixer driven through apu.h with each channel's level set by hand,
 // every expected level the mixer page's formula scaled by 32 767 and rounded; the
-// decimator driven a cycle at a time, every expected cycle and mean derived from the CPU
-// clock and the rate; the machine with its frames drained both ways; and blargg's mixer
-// programs booted on the machine and measured in the frames they make. A cycle below is a
-// call counted from a chip's first, or a machine cycle counted from power-on, whose first
-// seven cycles are the reset sequence; a picture is 357 368 master cycles. The
-// NEASANT_NES_TEST_ROMS option, the skips and the require variable are as in the frame
-// counter's test.
+// decimator driven a cycle at a time, every expected cycle derived from the CPU clock and
+// the rate and every mean from the output stage's answers over the cycles (apuFilter; the
+// filter's test derives those); the machine with its frames drained both ways; and
+// blargg's mixer programs booted on the machine and measured in the frames they make. A
+// cycle below is a call counted from a chip's first, or a machine cycle counted from
+// power-on, whose first seven cycles are the reset sequence; a picture is 357 368 master
+// cycles. The NEASANT_NES_TEST_ROMS option, the skips and the require variable are as in
+// the frame counter's test.
 
 namespace {
 
@@ -56,11 +57,13 @@ using Frames = std::vector<std::int16_t>;
 
 // ---- The chip ----
 
-// A chip with every channel's level set by hand. The triangle, which stands at 15 at
-// power-on, is at the level the case names.
+// A chip with every channel's level set by hand and its output stage set to rest, both
+// filters at 0. The triangle, which stands at 15 at power-on, is at the level the case
+// names.
 ApuState levels(std::uint8_t pulse1, std::uint8_t pulse2, std::uint8_t triangle,
                 std::uint8_t noise, std::uint8_t dmc) {
   ApuState state{};
+  state.filter = neasant::ApuFilter{.highPass = 0, .lowPass = 0};
   state.pulse[0].output = pulse1;
   state.pulse[1].output = pulse2;
   state.triangle.output = triangle;
@@ -120,8 +123,8 @@ constexpr std::int64_t kToneCycles = 1792;
 constexpr std::int64_t kBeepStep = 4895;
 
 // What one picture's frames measure, in whole numbers. `energy` is the sum of the squares
-// of each frame's distance from the picture's mean; the mean is left out because the DACs'
-// level carries the DC the console's high-pass filter removes (NESdev wiki, "APU Mixer").
+// of each frame's distance from the picture's mean, which is left out so that a level the
+// output stage is still taking away adds nothing.
 // `tone` is the step of a square wave of the beep's period in the picture: each frame's
 // distance from the mean is added or subtracted by the half of the period its last CPU
 // cycle falls in, and again a quarter period on, and twice the two sums' magnitudes over
@@ -403,8 +406,10 @@ TEST(ApuDecimate, AtFortyEightThousandASampleSpans37Or38Cycles) {
   EXPECT_EQ(state.decimator, ApuDecimator{});
 }
 
-// A sample is the mean of the levels of the cycles it spans, the fraction dropped: the DMC
-// at 127 is 18 817 (NESdev wiki, "APU Mixer").
+// A sample is the mean of the output stage's answers over the cycles it spans, the
+// fraction dropped. The DMC at 127 is 18 817 at the mixer (NESdev wiki, "APU Mixer");
+// from rest the stage answers one cycle at it and 37 at 0 with a mean of 415, the next 37
+// at it with 10 372 as its low-pass rises, and 19 more at it then 18 at 0 with 14 008.
 TEST(ApuDecimate, ASampleIsTheMeanOfTheLevelsItSpans) {
   ApuState state = levels(0, 0, 0, 0, 127);
   EXPECT_FALSE(apuDecimate(state, kAt48000)) << "call 1";
@@ -412,12 +417,12 @@ TEST(ApuDecimate, ASampleIsTheMeanOfTheLevelsItSpans) {
   for (long call = 2; call <= 37; ++call) {
     EXPECT_FALSE(apuDecimate(state, kAt48000)) << "call " << call;
   }
-  EXPECT_EQ(apuDecimate(state, kAt48000), std::optional<std::int16_t>(495)) << "call 38";
+  EXPECT_EQ(apuDecimate(state, kAt48000), std::optional<std::int16_t>(415)) << "call 38";
   state.dmc.output = 127;
   for (long call = 39; call <= 74; ++call) {
     EXPECT_FALSE(apuDecimate(state, kAt48000)) << "call " << call;
   }
-  EXPECT_EQ(apuDecimate(state, kAt48000), std::optional<std::int16_t>(18817)) << "call 75";
+  EXPECT_EQ(apuDecimate(state, kAt48000), std::optional<std::int16_t>(10372)) << "call 75";
   for (long call = 76; call <= 94; ++call) {
     EXPECT_FALSE(apuDecimate(state, kAt48000)) << "call " << call;
   }
@@ -425,22 +430,24 @@ TEST(ApuDecimate, ASampleIsTheMeanOfTheLevelsItSpans) {
   for (long call = 95; call <= 111; ++call) {
     EXPECT_FALSE(apuDecimate(state, kAt48000)) << "call " << call;
   }
-  EXPECT_EQ(apuDecimate(state, kAt48000), std::optional<std::int16_t>(9662)) << "call 112";
+  EXPECT_EQ(apuDecimate(state, kAt48000), std::optional<std::int16_t>(14008)) << "call 112";
 }
 
 // At the CPU clock's 1 789 772 a cycle is 236 249 904 units of the 236 250 000 a sample
 // takes (NESdev wiki, "CPU", Frequencies), so the first sample spans two cycles and every
-// later one a single cycle, the time left over shrinking by 96 units a sample.
+// later one a single cycle, the time left over shrinking by 96 units a sample. The stage
+// answers 902 and 859 to the DMC's 18 817 then 0, a mean of 880, and 1370 to a level of
+// 11 540 after them.
 TEST(ApuDecimate, AtTheHighestRateASampleSpansTwoCyclesThenOne) {
   constexpr ApuInputs kHighest{.audioRate = 1789772, .expansion = 0};
   ApuState state = levels(0, 0, 0, 0, 127);
   EXPECT_FALSE(apuDecimate(state, kHighest));
   EXPECT_EQ(state.decimator.elapsed, 236249904u);
   state.dmc.output = 0;
-  EXPECT_EQ(apuDecimate(state, kHighest), std::optional<std::int16_t>(9408));
+  EXPECT_EQ(apuDecimate(state, kHighest), std::optional<std::int16_t>(880));
   EXPECT_EQ(state.decimator.elapsed, 236249808u);
   state.dmc.output = 64;
-  EXPECT_EQ(apuDecimate(state, kHighest), std::optional<std::int16_t>(11540));
+  EXPECT_EQ(apuDecimate(state, kHighest), std::optional<std::int16_t>(1370));
 }
 
 // A rate of 0 makes no sample and leaves the state as it is.
@@ -453,26 +460,28 @@ TEST(ApuDecimate, ARateOfZeroAnswersNothingAndLeavesTheState) {
   EXPECT_EQ(state, before);
 }
 
-// The cartridge's level is part of every cycle's level, and so of the sample's mean.
+// The cartridge's level is part of every cycle's level, and so of what the output stage
+// is given: its answers to -700 held from rest have a mean of -389 over the first
+// sample's 38 cycles.
 TEST(ApuDecimate, TheExpansionLevelIsMixedIntoEverySample) {
   ApuState state = levels(0, 0, 0, 0, 0);
   constexpr ApuInputs kWithExpansion{.audioRate = 48000, .expansion = -700};
   for (int call = 1; call <= 37; ++call) {
     EXPECT_FALSE(apuDecimate(state, kWithExpansion)) << "call " << call;
   }
-  EXPECT_EQ(apuDecimate(state, kWithExpansion), std::optional<std::int16_t>(-700));
+  EXPECT_EQ(apuDecimate(state, kWithExpansion), std::optional<std::int16_t>(-389));
 }
 
 // The decimator is the core's sampling of the chip's output and no register of the chip,
 // so the reset line leaves it where it stands: 20 cycles of 6 336 000 units each at
-// 48 000 Hz, the DMC's 18 817 summed over them.
+// 48 000 Hz, the output stage's answers to the DMC's 18 817 summed over them.
 TEST(ApuDecimate, ResetKeepsTheDecimator) {
   ApuState state = levels(0, 0, 0, 0, 127);
   for (int call = 1; call <= 20; ++call) {
     EXPECT_FALSE(apuDecimate(state, kAt48000)) << "call " << call;
   }
   EXPECT_EQ(state.decimator.elapsed, 126720000u);
-  EXPECT_EQ(state.decimator.sum, 376340);
+  EXPECT_EQ(state.decimator.sum, 142232);
   EXPECT_EQ(state.decimator.count, 20u);
   const ApuDecimator before = state.decimator;
   apuReset(state);
@@ -481,24 +490,29 @@ TEST(ApuDecimate, ResetKeepsTheDecimator) {
 
 // ---- MixerMachine ----
 
-// The first frame spans machine cycles 0 to 37: twelve at 8074, the triangle's level 15
-// alone at power-on, and twenty-six at 22 325, with the DMC's level 127 from the write in
-// cycle 12 (NESdev wiki, "APU DMC": $4011 loads the counter directly; "APU Mixer").
-TEST(MixerMachine, PowerOnSoundsTheTrianglesFirstStepAndAWriteMovesTheLevel) {
+// The mixer's level is 8074 for machine cycles 0 to 11, the triangle's level 15 alone at
+// power-on, and 22 325 from the write in cycle 12, with the DMC's level 127 (NESdev wiki,
+// "APU DMC": $4011 loads the counter directly; "APU Mixer"). The output stage is settled
+// on the 8074 at power-on, so those twelve cycles answer 0 and the write is a step of
+// 14 251: the first frame, cycles 0 to 37, is 4366 as the low-pass rises on it, and the
+// second is 12 342.
+TEST(MixerMachine, AWriteToTheDmcsLevelPassesAsAStep) {
   const Bytes image = imageWith(kLevelProgram);
   Nes machine(NesConfig{.rom = image});
   stepCycles(machine, 37);
   EXPECT_TRUE(machine.takeFrames().empty());
   machine.step();
-  EXPECT_EQ(machine.takeFrames(), (Frames{17824}));
+  EXPECT_EQ(machine.takeFrames(), (Frames{4366}));
   stepCycles(machine, 37);
-  EXPECT_EQ(machine.takeFrames(), (Frames{22325}));
+  EXPECT_EQ(machine.takeFrames(), (Frames{12342}));
   EXPECT_TRUE(machine.takeFrames().empty());
 }
 
 // The output takes the level the cycle's tick leaves: the $4003 write in cycle 28 loads
 // the length counter at that cycle's tick, so pulse 1's level is 15 from cycle 28 on and
-// the first frame holds 28 cycles at 8074 and ten at 12 969. The pulse's timer, reloaded
+// the first frame holds 28 cycles at 8074, which the output stage answers with 0, and
+// ten at 12 969, a step of 4895: the frame is 294, and the second, 37 cycles at 12 969, is
+// 3526. The pulse's timer, reloaded
 // with 255 at cycle 22's tick, next steps the sequencer at cycle 534 (NESdev wiki, "APU
 // Pulse"; "APU Length Counter").
 TEST(MixerMachine, TheOutputTakesTheLevelTheCyclesTickLeaves) {
@@ -509,9 +523,9 @@ TEST(MixerMachine, TheOutputTakesTheLevelTheCyclesTickLeaves) {
   machine.step();
   EXPECT_EQ(machine.state().apu.pulse[0].output, 15);
   stepCycles(machine, 9);
-  EXPECT_EQ(machine.takeFrames(), (Frames{9362}));
+  EXPECT_EQ(machine.takeFrames(), (Frames{294}));
   stepCycles(machine, 37);
-  EXPECT_EQ(machine.takeFrames(), (Frames{12969}));
+  EXPECT_EQ(machine.takeFrames(), (Frames{3526}));
 }
 
 // A picture's 357 368 master cycles are 29 780 and two thirds CPU cycles (NESdev wiki,
@@ -568,8 +582,10 @@ TEST(MixerMachine, TwoMachinesRunDifferentlyDrainEqualFrames) {
     least = frame < least ? frame : least;
     greatest = frame > greatest ? frame : greatest;
   }
-  EXPECT_EQ(least, 8074);
-  EXPECT_EQ(greatest, 12969);
+  // The greatest frame is the tenth, the beep's first high half before the output stage
+  // has centred the wave; the least is a low half once it has.
+  EXPECT_EQ(least, -2689);
+  EXPECT_EQ(greatest, 4731);
 
   Nes c(NesConfig{.rom = image});
   c.restore(*afterFirst);
@@ -631,8 +647,9 @@ TEST(MixerMachine, ACopiedMachineCarriesTheFramesPending) {
   EXPECT_EQ(fromCopy, machine.takeFrames());
 }
 
-// The measure on a beep alone: a square wave of step 4895 about its mean, less the
-// samples that span its edges, two in every 48 or so, which blend its two levels.
+// The measure on a beep alone: a square wave of step 4895 which the output stage centres
+// and lets sag between its edges, less the samples that span an edge, two in every 48 or
+// so, which blend its two levels.
 TEST(MixerMachine, TheMeasureReadsAnAuthoredBeepsStepAndLevel) {
   const Bytes image = imageWith(kBeepProgram);
   Nes machine(NesConfig{.rom = image});
@@ -645,8 +662,8 @@ TEST(MixerMachine, TheMeasureReadsAnAuthoredBeepsStepAndLevel) {
     first += static_cast<std::int64_t>(frames.size());
     if (picture > 0) totals.add(measured);
   }
-  EXPECT_EQ(wholeRoot(totals.energy / totals.count), 2412);
-  EXPECT_EQ(totals.tone / totals.pictures, 4890);
+  EXPECT_EQ(wholeRoot(totals.energy / totals.count), 2370);
+  EXPECT_EQ(totals.tone / totals.pictures, 4951);
 }
 
 // ---- The programs ----
@@ -655,26 +672,26 @@ TEST(MixerMachine, TheMeasureReadsAnAuthoredBeepsStepAndLevel) {
 // noise test, there should be near silence between the beeps." square.s plays both pulses
 // at every total against the DMC, which cancels them.
 TEST(ApuMixer, Square) {
-  expectHeard("apu_mixer/square.nes", {{219, 236}, {928, 945}, 970, 28, 10});
+  expectHeard("apu_mixer/square.nes", {{219, 236}, {928, 945}, 970, 22, 10});
 }
 
 // apu_mixer's readme: "near silence between the beeps". triangle.s plays the triangle over
 // its range of levels against the DMC, which cancels it.
 TEST(ApuMixer, Triangle) {
-  expectHeard("apu_mixer/triangle.nes", {{219, 236}, {565, 583}, 606, 19, 7});
+  expectHeard("apu_mixer/triangle.nes", {{219, 236}, {565, 583}, 606, 15, 7});
 }
 
 // apu_mixer's readme: "For the noise test, noise will fade in and out. There shouldn't be
 // any noticeable tone". noise.s plays the noise at each volume, its level toggled against
 // the DMC.
 TEST(ApuMixer, Noise) {
-  expectHeard("apu_mixer/noise.nes", {{221, 238}, {1119, 1136}, 1159, 172, 13});
+  expectHeard("apu_mixer/noise.nes", {{221, 238}, {1119, 1136}, 1159, 130, 13});
 }
 
 // apu_mixer's readme: "near silence between the beeps". dmc.s plays pulse 1 at volume 15
 // against pairs of DMC levels over its range, which cancel it.
 TEST(ApuMixer, Dmc) {
-  expectHeard("apu_mixer/dmc.nes", {{219, 236}, {679, 696}, 719, 25, 8});
+  expectHeard("apu_mixer/dmc.nes", {{219, 236}, {679, 696}, 719, 18, 8});
 }
 
 }  // namespace

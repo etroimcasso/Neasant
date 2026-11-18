@@ -14,9 +14,10 @@ the CPU's and the APU's self-checking test programs pass on it
 ([Testing against the programs](#testing-against-the-programs)). The PPU is its register file,
 its memories, its frame counter and its NMI output, with no tile fetched. The APU is its frame
 counter, its status register and its five channels, each answering the level its DAC takes, with
-the DMC fetching its samples through the DMA unit and both interrupts on the CPU's IRQ line, and
-its mixer, whose level is averaged down to the frames a host drains ([The APU](#the-apu)). PAL
-and Dendy are named by `Region` and refused at construction, so every machine is NTSC.
+the DMC fetching its samples through the DMA unit and both interrupts on the CPU's IRQ line, its
+mixer and the console's output filters, whose output is averaged down to the frames a host drains
+([The APU](#the-apu)). PAL and Dendy are named by `Region` and refused at construction, so every
+machine is NTSC.
 
 The status table in the [README](../README.md) is the component's status row. The CPU core the
 machine steps is on [the 6502 core's page](6502-cpu.md).
@@ -135,10 +136,10 @@ struct NesConfig {
   // instr_test-v5 expects LXA #imm to leave its operand in A and X, which only $FF gives
   // (its 03-immediate source: the checksum for ATX #n is TAX's).
   std::uint8_t unstableConstant = 0xFF;
-  // The rate the APU's output is decimated to, in samples a second; 0 produces no
-  // samples. Each sample is the mean of the chip's output level over the CPU cycles it
-  // spans, and the samples come at exactly this rate against the master clock
-  // (apuDecimate in apu.h); takeFrames() drains them.
+  // The rate the console's output is decimated to, in samples a second; 0 produces no
+  // samples. Each sample is the mean of the output over the CPU cycles it spans, and the
+  // samples come at exactly this rate against the master clock (apuDecimate in apu.h);
+  // takeFrames() drains them.
   std::uint32_t audioRate = 48000;
   // The pattern every RAM is filled with at power-on, repeated from its start; empty
   // fills with $00. The hardware leaves RAM unreliable at power-on (NESdev wiki, "CPU
@@ -276,9 +277,10 @@ for (int cycle = 0; cycle < 7 + 4 + 3 + 4 + 3; ++cycle) machine.step();
 
 `state().apu` is the APU as one value, `ApuState` (`neasant/apu/apu.h`): the frame counter, the
 four length counters, the two pulses, the triangle, the noise and the DMC, the two interrupt
-flags with the IRQ line they drive, and the output's decimator. The APU ticks once a machine
-cycle, after the cycle's access, and the tick is given the half of the APU cycle the machine cycle
-falls in ([A machine cycle](#a-machine-cycle)). After the tick the output moves on a cycle.
+flags with the IRQ line they drive, the console's output stage and the output's decimator. The APU
+ticks once a machine cycle, after the cycle's access, and the tick is given the half of the APU
+cycle the machine cycle falls in ([A machine cycle](#a-machine-cycle)). After the tick the output
+moves on a cycle.
 
 - **The frame counter** runs the 4-step sequence or the 5-step one by `$4017` bit 7, counting CPU
   cycles from its origin. The quarter-frame clock falls at cycles 7457, 14 913, 22 371 and 29 829
@@ -365,32 +367,49 @@ falls in ([A machine cycle](#a-machine-cycle)). After the tick the output moves 
   each curve's value is scaled by 32 767 and rounded to the nearest whole number, and the two are
   added (NESdev wiki, "APU Mixer"). Each curve flattens as it rises, so the DMC's level sets how
   far the triangle and the noise move the output: the triangle's 15 adds 8074 over a DMC at 0 and
-  3508 over one at 127. The level is the DACs' own, 0 with every channel at 0; the console's
-  90 Hz high-pass and 14 kHz low-pass filters are left to the host.
-- **The frames.** After each tick the level is added to the sample under way, and when the
-  config's `audioRate` makes one due it is queued as a frame: the mean of the level over the CPU
-  cycles the sample spans, 37 or 38 at 48 000 Hz, with the fraction dropped. The first N cycles
+  3508 over one at 127. The level is the DACs' own, 0 with every channel at 0.
+- **The output stage.** The NES follows its DACs with a first-order high-pass filter at
+  90 Hz and a first-order low-pass at 14 kHz (NESdev wiki, "APU Mixer"), and `apuFilter` is
+  the two, run once a CPU cycle on the mixer's level. Each filter moves a fixed part of the
+  way from the level it holds to the level it is given, the part a filter of its corner
+  moves toward a level held for one CPU cycle: 5300 / 16 777 216 for the high-pass, a corner
+  of 90.00002 Hz, and 804 639 / 16 777 216 for the low-pass, 13 999.997 Hz. The high-pass
+  answers the mixer's level less the level it holds; the low-pass is given that, and the
+  level it holds, rounded and held within −32 768 and 32 767, is the stage's output. A level
+  that stands is taken away, so the output rests at 0 whatever the DACs hold: a step of the
+  level passes, falls to 1 / e of itself every 3165 cycles, 1.77 ms, and reaches 0. The
+  low-pass follows a step with a time constant of 21 cycles, which rounds an edge over a
+  sample or two at 48 000 Hz. The two levels are state, `apu.filter`. At power-on the
+  high-pass holds the level the DACs start at, 8074, so the output opens at 0; a reset
+  keeps both.
+- **The frames.** After each tick the mixer's level goes through the output stage, the stage's
+  output is added to the sample under way, and when the config's `audioRate` makes one due it is
+  queued as a frame: the mean of the output over the CPU cycles the sample spans, 37 or 38 at
+  48 000 Hz, with the fraction dropped. The first N cycles
   from power-on make the whole part of N × rate × 132 / 236 250 000 frames, so a picture's
   357 368 master cycles make 798 or 799 at 48 000 Hz and two machines run alike queue equal
   frames. `takeFrames()` answers the frames queued, oldest first, and leaves none;
   `takeFrames(into)` writes as many as the caller's storage holds, answers the count, keeps the
   rest and allocates nothing. Frames are output: a snapshot does not carry them, and `restore()`
   and `reset()` discard those not yet drained. The decimator's place in its sample is state,
-  `apu.decimator`, and a reset keeps it. A machine built with an `audioRate` of 0 queues none.
+  `apu.decimator`, and a reset keeps it. A machine built with an `audioRate` of 0 queues none
+  and leaves the output stage as power-on set it.
 - **Power-on and reset.** At power-on the sequence starts at the first cycle's tick, nine cycles
   before the first instruction, the usual figure of the 9 to 12 that blargg's `apu_reset` readme
   measures, in the 4-step mode with the interrupt enabled; every channel is disabled and every
   register 0, the triangle stands at its first step with its level 15, and the noise's shift
-  register holds 1, and the DMC is silent with its level 0, so the output stands at 8074, the
-  triangle's 15 alone (NESdev wiki, "CPU power up state", APU; "APU Noise", Operation). A reset
+  register holds 1, and the DMC is silent with its level 0, so the mixer's level stands at 8074,
+  the triangle's 15 alone (NESdev wiki, "CPU power up state", APU; "APU Noise", Operation), and
+  the output, whose stage starts settled on that level, opens at 0. A reset
   disables every channel, clears the flag, returns the triangle to its first step, stops the DMC's
   sample with its level's low bit kept, clears the DMC's interrupt flag and restarts the sequence
   on the next cycle in the mode last written to `$4017`; the channels' registers, timers,
-  envelopes and sweeps, the noise's shift register and the output's decimator keep their values ([The reset line](#the-reset-line)).
+  envelopes and sweeps, the noise's shift register, the output stage and the output's decimator
+  keep their values ([The reset line](#the-reset-line)).
 
 Each channel's level is in the state value as the last tick left it, `pulse[0].output`,
 `pulse[1].output`, `triangle.output`, `noise.output` and `dmc.output`, and
-`apuMix(machine.state().apu, 0)` is the output's level over them. A program that loads pulse 1's
+`apuMix(machine.state().apu, 0)` is the mixer's level over them. A program that loads pulse 1's
 counter and reads the status back, then runs until the sequence's flag:
 
 ```cpp
@@ -462,17 +481,20 @@ std::vector<std::uint8_t> image = nromImage({0xA9, 0x7F, 0x8D, 0x11, 0x40, 0x4C,
 neasant::Nes machine(neasant::NesConfig{.rom = image});
 for (int cycle = 0; cycle < 38; ++cycle) machine.step();
 const std::vector<std::int16_t> first = machine.takeFrames();
-// first.size() == 1 and first[0] == 17824: twelve cycles at 8074 and twenty-six at 22325
+// first.size() == 1 and first[0] == 4366: a step of 14251 from cycle 12, the low-pass rising
 machine.run(neasant::consoleClock(neasant::Region::Ntsc).masterCyclesPerFrame);
 std::vector<std::int16_t> storage(512);
 const std::size_t written = machine.takeFrames(storage);
-// written == 512 and storage[0] == 22325: the oldest frames, into the caller's storage
+// written == 512 and storage[0] == 12342: the oldest frames, into the caller's storage
 // machine.takeFrames().size() == 286: the run made 798, and the rest stayed queued
 ```
 
-The write to `$4011` lands in cycle 12. The first frame spans cycles 0 to 37: twelve at 8074, the
-triangle's level 15 alone, and twenty-six at 22 325, the level with the DMC at 127. The run then
-makes 798 frames, of which the caller's storage takes the oldest 512.
+The write to `$4011` lands in cycle 12. Until then the mixer's level is 8074, the triangle's level
+15 alone, which the output stage is settled on, and the output is 0. The write takes the level to
+22 325, the level with the DMC at 127, a step of 14 251: the first frame, cycles 0 to 37, is 4366
+as the low-pass rises on it, and the second is 12 342. The stage then takes the standing level
+away, and the output is back at 0 within 20 ms. The run makes 798 frames, of which the caller's
+storage takes the oldest 512.
 
 ## Stepping and running
 
@@ -593,7 +615,7 @@ value, and everything else keeps what it held:
 | | After `reset()` |
 |---|---|
 | the CPU | the sequence pending: on the next seven cycles the program counter goes to the vector, S ends three lower and I is set; A, X, Y and the other flags keep their values; a jammed core is released; an instruction in progress is abandoned |
-| the APU | every channel disabled with its length counter at 0, the DMC's sample stopped with its interrupt flag clear and its level's low bit kept, the frame interrupt flag clear, the triangle's sequencer at its first step, the sequence restarting on the next cycle in the mode last written to `$4017`; the inhibit bit, the halt bits, the channels' registers, timers, envelopes and sweeps, the noise's shift register, the DMC's buffer and output unit, and the output's decimator kept ([The APU](#the-apu)) |
+| the APU | every channel disabled with its length counter at 0, the DMC's sample stopped with its interrupt flag clear and its level's low bit kept, the frame interrupt flag clear, the triangle's sequencer at its first step, the sequence restarting on the next cycle in the mode last written to `$4017`; the inhibit bit, the halt bits, the channels' registers, timers, envelopes and sweeps, the noise's shift register, the DMC's buffer and output unit, the output stage and the output's decimator kept ([The APU](#the-apu)) |
 | the DMA unit | a transfer or a fetch under way ends and the CPU is released; the page latch keeps its byte |
 | the frames not yet drained | discarded |
 | the PPU | `$2000`, `$2001`, the temporary address, the fine X scroll, the write toggle and the read buffer cleared; the counter at dot 0 of scanline 0 of an even frame; the warm-up window open; the vertical-blank flag, the OAM address, the current address, the I/O bus and the memories kept ([the PPU page](ppu.md#the-reset-line)) |
@@ -1252,12 +1274,12 @@ naming it. Fiskbit's 21 cases are measured through the bus observer as the cycle
 gives the figure his readme measures on an RP2A03H. `apu_mixer`'s four report by sound: each
 plays a beep, a test tone its DMC level cancels, and a beep, and its case drains the frames a
 picture at a time and pins where the two beeps fall and, between them, the level and the tone in
-thousandths of the beeps' own: 28 and 10 for `square`, 19 and 7 for `triangle`, 25 and 8 for
-`dmc`, and 172 and 13 for `noise`, whose readme has its noise fade in and out with no tone. `2-nmi_and_brk`, whose
+thousandths of the beeps' own: 22 and 10 for `square`, 15 and 7 for `triangle`, 18 and 8 for
+`dmc`, and 130 and 13 for `noise`, whose readme has its noise fade in and out with no tone. `2-nmi_and_brk`, whose
 readme says it "occasionally fails on NES due to PPU-CPU synchronization", passes under
 alignment 0, the default, and fails under 1, 2 and 3. Every APU program passes under either
 `apuPhase`; the mixer programs' figures are the default's, and under the other half `square`
-gives 18 and 7 and `dmc` 18 and 6.
+gives 14 and 7 and `dmc` 12 and 6.
 
 The repository is reference data and is not vendored. Point the build at a local clone:
 
@@ -1310,6 +1332,11 @@ The hand-derived suites, by executable:
   38 cycles a sample, its mean, its highest rate and a rate of 0, driven through `apu.h`; on the
   machine the level a write leaves, the frames of a picture, the two drains, the frames a restore
   and a reset discard and two machines' equal frames; and the mixer programs above.
+- `apu_filter_test` — the output stage's two filters a cycle at a time: the level the
+  stage holds at power-on, one cycle's move of each filter, a step's rise and decay, a
+  standing level settling to 0, a fall, a square wave's sag and the answer held within a
+  sample, driven through `apu.h`; on the machine an idle program's silence, the stage in
+  a snapshot, across a reset and at a rate of 0.
 
 Every value they assert is read from a document named under [Sources](#sources).
 
@@ -1327,9 +1354,10 @@ Every value they assert is read from a document named under [Sources](#sources).
   after its origin and every 29 830 after that, and the flag holds the IRQ line low until `$4015`
   is read or `$4017` is written with bit 6 set; a program that clears I without doing either is
   interrupted.
-- **The frames carry the DACs' DC.** The output is 0 only with every channel at 0: it stands at
-  8074 from power-on, the triangle at its first step, and rides the DMC's level. A host that wants
-  the console's sound applies its 90 Hz high-pass.
+- **The output rests at 0.** The output stage takes a standing level away: the machine
+  opens at 0 with the mixer's level at 8074, the triangle at its first step, and a change
+  of the DMC's level passes as a step that fades to 0 within 20 ms. A frame's value is
+  the output's distance from that rest, never the DACs' level itself.
 - **Drain the frames.** A machine queues 48 000 a second by default until `takeFrames` is called;
   an `audioRate` of 0 queues none.
 - **The DMC halts the CPU anywhere.** Each sample byte costs three or four cycles on a read cycle
@@ -1408,13 +1436,27 @@ by the documents the machine is built from.
     reference includes it; the machine follows the reference, which Visual 2A03 bears out. The
     same simulation has a reset clear an envelope's decay level, where the machine keeps it; a note
     restarts its envelope before it sounds, so no level depends on it. Within a tick the frame
-. **The output.** The "APU Mixer" page calls its formula approximate and gives a lookup-table
+11. **The output.** The "APU Mixer" page calls its formula approximate and gives a lookup-table
     form within 4% of it; the machine evaluates the formula itself. On it blargg's `apu_mixer`
     programs leave 7 to 13 thousandths of a beep's step between their beeps, where the table form
-    leaves 63 in `triangle`. The console follows its DACs with a 90 Hz high-pass, a 14 kHz
-    low-pass and a second-order low-pass above the audible range; the machine applies none, and
-    its decimator is a mean over each sample's CPU cycles, which lets through, attenuated, what
-    lies above half the rate. Damian Yerrick's `volume_tests` carries a recording of an NTSC
+    leaves 63 in `triangle`. The "APU Mixer" page gives the NES a first-order high-pass at 90 Hz,
+    a first-order low-pass at 14 kHz and "a second-order low-pass comfortably above the audible
+    range and thus not needed for emulation"; the machine has the first two at the page's corners.
+    The circuit the page links ("NES Audio Path", archive.nesdev.org/NESAudio.gif) draws the third
+    as 39 µH into 0.011 µF, a corner near 243 kHz, behind an amplifier made of one inverter of a
+    74HCU04, and the machine omits it. Worked from its component values, the drawing gives other
+    corners than the page: with an ideal amplifier the feedback pair, 47 kΩ and 220 pF, is a
+    low-pass at 15.4 kHz and the input's 1 µF behind 7.5 kΩ a high-pass at 21 Hz; at the
+    open-loop gain of 20 the 74HCU04's data sheet gives as typical (Nexperia, Rev. 10,
+    "Application information") they are 17 kHz and 16 Hz; and the output's 10 µF behind 150 Ω
+    reaches 90 Hz only into a load of 27 Ω. The machine takes the page's figures. The drawing's
+    amplifier inverts and it does not give the sense of the DACs' pins, so the output keeps the
+    formula's sense and rises with the level. No document gives the charge the stage's
+    capacitors hold at power-on; the machine starts the stage settled on the level the DACs
+    start at, so its output opens at 0. The page gives the Famicom a first-order high-pass at
+    37 Hz alone, ahead of its RF modulator; the machine is the NES. The decimator is a mean over
+    each sample's CPU cycles, which lets through, attenuated, what lies above half the rate.
+    Damian Yerrick's `volume_tests` carries a recording of an NTSC
     NES-001 playing its twelve tones and its readme states no level for them; no case compares
     against the recording.
 
@@ -1433,15 +1475,15 @@ by the documents the machine is built from.
 - `include/neasant/nes/clock.h` — `Region`, `ConsoleClock` and `FrameDeadline`.
 - `include/neasant/apu/apu.h` — `ApuState` with its length counters, envelopes, sweeps, pulses,
   triangle, noise and DMC, and the functions the machine calls: the write, the status read, the
-  tick, the IRQ output, the reset, the DMC's fetch request and delivery, the mixer's level and the
-  decimator's cycle.
+  tick, the IRQ output, the reset, the DMC's fetch request and delivery, the mixer's level, the
+  output stage's cycle and the decimator's.
 - `src/nes/nes.cpp` — the button names, construction, the decode, the bus with open bus, the
   controller ports' clock lines, the DMA unit's OAM transfer and DMC fetch, the machine cycle,
   `step` and `run`, `reset` and `restore`, the two drains.
 - `src/apu/apu.cpp` — the length table, the frame counter's steps and its restart, the quarter-
   and half-frame clocks, the duty, triangle and noise period tables, the timers and each channel's
-  level, the DMC's rate table, its reader and its output unit, the mixer's two curves and the
-  decimator.
+  level, the DMC's rate table, its reader and its output unit, the mixer's two curves, the
+  output stage's two filters and the decimator.
 - `tests/nes/` — the five hand-derived suites, the authored-image helper, and the test-ROM
   harness with its suite; `tests/apu/` — the APU's suites.
 

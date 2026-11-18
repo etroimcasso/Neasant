@@ -77,10 +77,10 @@ struct NesConfig {
   // instr_test-v5 expects LXA #imm to leave its operand in A and X, which only $FF gives
   // (its 03-immediate source: the checksum for ATX #n is TAX's).
   std::uint8_t unstableConstant = 0xFF;
-  // The rate the APU's output is decimated to, in samples a second; 0 produces no
-  // samples. Each sample is the mean of the chip's output level over the CPU cycles it
-  // spans, and the samples come at exactly this rate against the master clock
-  // (apuDecimate in apu.h); takeFrames() drains them.
+  // The rate the console's output is decimated to, in samples a second; 0 produces no
+  // samples. Each sample is the mean of the output over the CPU cycles it spans, and the
+  // samples come at exactly this rate against the master clock (apuDecimate in apu.h);
+  // takeFrames() drains them.
   std::uint32_t audioRate = 48000;
   // The pattern every RAM is filled with at power-on, repeated from its start; empty
   // fills with $00. The hardware leaves RAM unreliable at power-on (NESdev wiki, "CPU
@@ -270,7 +270,7 @@ struct NesState {
   // toggles every machine cycle (NESdev wiki, "DMA", Cadence).
   std::uint8_t apuPhase = 0;
   // The APU: its frame counter, its length counters, its channels, its status, its IRQ
-  // line and its output's place in the sample under way.
+  // line, its output stage and its output's place in the sample under way.
   ApuState apu{};
   PpuState ppu{};
   // The cartridge's PRG RAM and CHR RAM, each sized at construction from the header or
@@ -407,13 +407,14 @@ class Nes {
   [[nodiscard]] std::size_t saveDataSize() const noexcept;
 
   // The frames the APU has produced since the last drain, oldest first, leaving none
-  // queued. One frame is one sample of the console's one output: the mixer's level, 0
-  // with every channel at 0 and up to 32 767, averaged down to the config's audioRate
-  // (apuMix and apuDecimate in apu.h), 798 or 799 of them in the 357 368 master cycles
-  // of one picture at 48 000 Hz. A machine queues frames as its cycles run, so a caller
-  // drains periodically to bound the queue. Frames are output, not state: a snapshot
-  // does not carry them, and restore() and reset() discard any that are pending. A
-  // machine built with an audioRate of 0 produces none.
+  // queued. One frame is one sample of the console's one output: the mixer's level
+  // through the console's output filters, resting at 0 and within -32 768 and 32 767,
+  // averaged down to the config's audioRate (apuMix, apuFilter and apuDecimate in
+  // apu.h), 798 or 799 of them in the 357 368 master cycles of one picture at 48 000 Hz.
+  // A machine queues frames as its cycles run, so a caller drains periodically to bound
+  // the queue. Frames are output, not state: a snapshot does not carry them, and
+  // restore() and reset() discard any that are pending. A machine built with an
+  // audioRate of 0 produces none.
   [[nodiscard]] std::vector<std::int16_t> takeFrames();
 
   // The frames produced since the last drain, into the caller's own storage, and how

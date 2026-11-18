@@ -9,8 +9,9 @@
 // sample buffer, its output unit and its interrupt flag, each channel answering the
 // level its DAC takes; the status register's read and write; the IRQ line the two
 // interrupt flags drive; power-on and reset; the seam the DMC's sample fetch takes
-// through the machine's DMA unit; the mixer, which makes one output level of the five;
-// and the decimator, which averages that level down to the samples a host drains.
+// through the machine's DMA unit; the mixer, which makes one level of the five; the
+// console's output stage, the two filters that level passes through; and the decimator,
+// which averages the stage's output down to the samples a host drains.
 
 #include <array>
 #include <cstdint>
@@ -220,10 +221,22 @@ struct ApuDmc {
   [[nodiscard]] bool operator==(const ApuDmc&) const noexcept = default;
 };
 
-// Where the chip's output stands in the sample under way (apuDecimate). Time is counted
-// in units of 1 / (236 250 000 times the output rate) of a second: a CPU cycle is 132
-// times the rate of them and a sample is 236 250 000 (NESdev wiki, "CPU", Frequencies:
-// the CPU clock is 236 250 000 / 132 Hz).
+// The console's output stage, the two filters the NES follows its DACs with (apuFilter):
+// the level each holds, in units of 1 / 16 777 216 of the mixer's level.
+struct ApuFilter {
+  // The level the high-pass has settled on, which it takes away from the mixer's. At
+  // power-on it is the level the DACs start at, 8074 with the triangle at its first step,
+  // so the output opens at 0.
+  std::int64_t highPass = std::int64_t{8074} * 16777216;
+  // The level the low-pass has reached, the stage's output.
+  std::int64_t lowPass = 0;
+  [[nodiscard]] bool operator==(const ApuFilter&) const noexcept = default;
+};
+
+// Where the console's output stands in the sample under way (apuDecimate). Time is
+// counted in units of 1 / (236 250 000 times the output rate) of a second: a CPU cycle is
+// 132 times the rate of them and a sample is 236 250 000 (NESdev wiki, "CPU",
+// Frequencies: the CPU clock is 236 250 000 / 132 Hz).
 struct ApuDecimator {
   // The time run since the last sample was made, in those units; below 236 250 000
   // between calls.
@@ -250,8 +263,8 @@ struct ApuInputs {
 // step, the noise's shift register 1, the DMC silent with its level 0, mode 0 with the
 // interrupt enabled, the flag clear, and the sequence restarting at the first machine
 // cycle's tick, which puts its origin nine cycles before the first instruction, the
-// figure blargg's apu_reset programs measure as usual; the output's first sample not yet
-// begun.
+// figure blargg's apu_reset programs measure as usual; the output stage settled on the
+// level the DACs start at, and the output's first sample not yet begun.
 struct ApuState {
   // Pulse 1, pulse 2, the triangle and the noise, in $4015's bit order.
   std::array<ApuLengthCounter, 4> length{};
@@ -289,6 +302,8 @@ struct ApuState {
   // "APU Frame Counter", Control register; Visual 2A03). Until the restart the counter
   // keeps stepping in its old mode.
   std::uint8_t restartDelay = 1;
+  // The console's output stage. Reset leaves it as it is.
+  ApuFilter filter{};
   // The output's place in its current sample. Reset leaves it as it is.
   ApuDecimator decimator{};
   [[nodiscard]] bool operator==(const ApuState&) const noexcept = default;
@@ -299,9 +314,10 @@ struct ApuState {
 // frame interrupt flag clear, the sequence restarting at the next tick in the mode last
 // written to $4017, the triangle's sequencer at its first step, and the pulses and the
 // noise silent. The inhibit bit, every halt bit, every channel register, every timer,
-// envelope and sweep, the noise's shift register, the DMC's buffer and output unit and
-// the decimator are kept (NESdev wiki, "CPU power up state", APU, the After Reset column;
-// "APU", Status; "APU Noise", Operation).
+// envelope and sweep, the noise's shift register, the DMC's buffer and output unit are
+// kept, and so are the output stage and the decimator, which stand outside the chip
+// (NESdev wiki, "CPU power up state", APU, the After Reset column; "APU", Status; "APU
+// Noise", Operation).
 void apuReset(ApuState& state) noexcept;
 
 // A CPU write to `address`, one of $4000-$4013, $4015 or $4017, in a cycle whose APU
@@ -377,19 +393,34 @@ void apuDmcDeliver(ApuState& state, std::uint8_t byte) noexcept;
 // (NESdev wiki, "APU Mixer"). Each curve flattens as its group's levels rise, so the
 // DMC's level sets how far a step of the triangle or the noise moves the output.
 // `expansion` is added to the sum, which is held at 32 767, the most a sample holds. The
-// level is the DACs' own: 0 with every channel at 0, and the console's output filters
-// are left to the host.
+// level is the DACs' own, 0 with every channel at 0; the console's output stage takes it
+// from here (apuFilter).
 [[nodiscard]] std::int16_t apuMix(const ApuState& state, std::int16_t expansion) noexcept;
 
-// One CPU cycle of the chip's output, called after the cycle's tick: adds the level
-// apuMix answers to the sample under way and moves the decimator on by the cycle, 132
-// times the rate; when that completes a sample's 236 250 000 it answers the sample, the
-// sum divided by the count of cycles it spans with the fraction dropped, and begins the
-// next with the time left over. A sample is thus the mean of the level over the cycles
-// it spans, 37 or 38 of them at 48 000 Hz, and the first N cycles from power-on make the
-// whole part of N times the rate times 132 / 236 250 000 samples. A rate of 0 answers
-// nothing and leaves the state as it is; the rate is at most the CPU clock's 1 789 772,
-// a sample a cycle.
+// One CPU cycle of the console's output stage, given the level the mixer answers for the
+// cycle: the two filters the NES follows its DACs with, a first-order high-pass at 90 Hz
+// and a first-order low-pass at 14 kHz (NESdev wiki, "APU Mixer"). Each moves a fixed
+// part of the way from the level it holds to the level it is given, the part a filter of
+// its corner moves toward a level held for one CPU cycle: 5300 / 16 777 216 for the
+// high-pass and 804 639 / 16 777 216 for the low-pass. The high-pass answers the mixer's
+// level less the level it holds; the low-pass is given that, and the level it holds,
+// rounded to the nearest whole number and held within -32 768 and 32 767, is the stage's
+// answer. A level that stands is taken away: a step of the level passes, falls to 1 / e
+// of itself every 3165 cycles, 1.77 ms, and reaches 0, so the output rests at 0 whatever
+// the DACs hold. The low-pass follows a step with a time constant of 21 cycles. At
+// power-on the high-pass holds the level the DACs start at, so the output opens at 0.
+[[nodiscard]] std::int16_t apuFilter(ApuState& state, std::int16_t level) noexcept;
+
+// One CPU cycle of the console's output, called after the cycle's tick: passes the level
+// apuMix answers through the output stage (apuFilter), adds the stage's answer to the
+// sample under way and moves the decimator on by the cycle, 132 times the rate; when that
+// completes a sample's 236 250 000 it answers the sample, the sum divided by the count of
+// cycles it spans with the fraction dropped, and begins the next with the time left
+// over. A sample is thus the mean of the console's output over the cycles it spans, 37 or
+// 38 of them at 48 000 Hz, and the first N cycles from power-on make the whole part of N
+// times the rate times 132 / 236 250 000 samples. A rate of 0 answers nothing and leaves
+// the state as it is, the output stage included; the rate is at most the CPU clock's
+// 1 789 772, a sample a cycle.
 [[nodiscard]] std::optional<std::int16_t> apuDecimate(ApuState& state,
                                                       const ApuInputs& inputs) noexcept;
 

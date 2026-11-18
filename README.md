@@ -34,8 +34,10 @@ embeddable. Pronounced "NESn't," like Peasant with an N.
 
 The CPU, the machine around it and the cartridge are built and documented; the PPU holds its
 register file and frame timing with no picture, the APU its frame counter, length counters, five
-channels and mixer, drained as samples, and NROM is the one board. This table gains a row's
-link and description as each component lands.
+channels, mixer and the console's output filters, drained as samples, and NROM is the one board.
+A command-line tool, `nes_render`, writes a cartridge's sound as a WAV file
+([tools](tools/README.md)). This table gains a row's link and description as each component
+lands.
 
 | Component | Status |
 |---|---|
@@ -60,10 +62,21 @@ cmake --build build
 ctest --test-dir build
 ```
 
+### The tools
+
+The build also makes the command-line tools. `nes_render` runs a cartridge from power-on and
+writes its sound as a WAV file:
+
+```
+build/tools/render/nes_render game.nes --seconds 30 -o game.wav
+```
+
+[tools/README.md](tools/README.md) lists the tools and the libraries behind them.
+
 ### Embedding the library
 
-Vendor the repository (a git submodule works) and link the library target. The test suite is
-off when the library is built inside a parent project.
+Vendor the repository (a git submodule works) and link the library target. The test suite and
+the tools are off when the library is built inside a parent project.
 
 ```cmake
 add_subdirectory(neasant)
@@ -85,7 +98,8 @@ cmake -B build -DNEASANT_NES6502_VECTORS=/path/to/65x02/nes6502/v1 \
                -DNEASANT_NES_TEST_ROMS=/path/to/nes-test-roms
 ```
 
-`NEASANT_BUILD_TESTS` turns the suite on or off explicitly.
+`NEASANT_BUILD_TESTS` turns the suite on or off explicitly, and `NEASANT_BUILD_TOOLS` the
+command-line tools; the tools' libraries build with the suite, which links them.
 
 ## Documentation
 

@@ -86,6 +86,16 @@ constexpr std::uint64_t kTndDivisor = 8227ull * 12241ull * 22638ull;
 // The level the curves' 1.0 is scaled to, which is also the most a sample holds.
 constexpr std::uint64_t kFullScale = 32767;
 
+// The output stage's two filters (NESdev wiki, "APU Mixer": a first-order high-pass at
+// 90 Hz and a first-order low-pass at 14 kHz). A first-order filter of corner f, given a
+// level held for one CPU cycle, moves 1 - e^(-2 pi f / F) of the way to it, F the CPU
+// clock's 236 250 000 / 132 Hz. Each step is that part of 16 777 216, rounded to the
+// nearest: 5300 stands for a corner of 90.00002 Hz and 804 639 for one of 13 999.997 Hz.
+constexpr int kFilterShift = 24;
+constexpr std::int64_t kFilterOne = std::int64_t{1} << kFilterShift;
+constexpr std::int64_t kHighPassStep = 5300;
+constexpr std::int64_t kLowPassStep = 804639;
+
 // The decimator's units (NESdev wiki, "CPU", Frequencies): the master clock is
 // 236 250 000 / 11 Hz and a CPU cycle twelve of its cycles, 132 / 236 250 000 of a
 // second, so in units of 1 / (236 250 000 times the rate) of a second a cycle is 132 times
@@ -599,10 +609,28 @@ std::int16_t apuMix(const ApuState& state, std::int16_t expansion) noexcept {
                                        : sum);
 }
 
+std::int16_t apuFilter(ApuState& state, std::int16_t level) noexcept {
+  ApuFilter& filter = state.filter;
+  // Each filter moves its step's part of the way to the level it is given. The shift
+  // rounds down, which leaves a filter at rest within a 5000th of a level of the one it
+  // is given, so the rounded answer to a standing level is exactly 0.
+  filter.highPass +=
+      ((std::int64_t{level} * kFilterOne - filter.highPass) * kHighPassStep) >> kFilterShift;
+  const std::int64_t passed =
+      std::int64_t{level} - ((filter.highPass + kFilterOne / 2) >> kFilterShift);
+  filter.lowPass += ((passed * kFilterOne - filter.lowPass) * kLowPassStep) >> kFilterShift;
+  const std::int64_t out = (filter.lowPass + kFilterOne / 2) >> kFilterShift;
+  // A cartridge's level can swing the mixer's by more than a sample holds; the answer is
+  // held within one.
+  if (out > 32767) return 32767;
+  if (out < -32768) return -32768;
+  return static_cast<std::int16_t>(out);
+}
+
 std::optional<std::int16_t> apuDecimate(ApuState& state, const ApuInputs& inputs) noexcept {
   if (inputs.audioRate == 0) return std::nullopt;
   ApuDecimator& decimator = state.decimator;
-  decimator.sum += apuMix(state, inputs.expansion);
+  decimator.sum += apuFilter(state, apuMix(state, inputs.expansion));
   ++decimator.count;
   decimator.elapsed += kCyclePeriodPerHertz * inputs.audioRate;
   if (decimator.elapsed < kSamplePeriod) return std::nullopt;
