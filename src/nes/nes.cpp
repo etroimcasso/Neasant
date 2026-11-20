@@ -29,6 +29,14 @@ constexpr std::uint8_t kGetHalf = 0;
 // The port the OAM DMA unit writes each byte to (NESdev wiki, "DMA", OAM DMA).
 constexpr std::uint16_t kOamDataPort = 0x2004;
 
+// The cycles a DMC fetch waits after it is taken before its halt is attempted: a load
+// halts on the get cycle of the second APU cycle after the $4015 write, two cycles on
+// from a get and three from a put; a reload attempts at once (NESdev wiki, "DMA", DMC
+// DMA).
+constexpr std::uint8_t kLoadDelayFromGet = 2;
+constexpr std::uint8_t kLoadDelayFromPut = 3;
+constexpr std::uint8_t kReloadDelay = 0;
+
 // The buttons in shift order, and their names.
 constexpr std::array<Button, kButtonCount> kButtons{Button::A,  Button::B,    Button::Select,
                                                     Button::Start, Button::Up, Button::Down,
@@ -108,7 +116,8 @@ Nes::Nes(NesConfig config)
     : cpu_(powerOn(), config.unstableConstant),
       region_(config.region),
       alignment_(config.alignment),
-      ppuOpenBusDecay_(config.ppuOpenBusDecay) {
+      ppuOpenBusDecay_(config.ppuOpenBusDecay),
+      audioRate_(config.audioRate) {
   if (config.region != Region::Ntsc) {
     throw std::invalid_argument("PAL and Dendy are not built; NTSC is");
   }
@@ -121,6 +130,12 @@ Nes::Nes(NesConfig config)
     throw std::invalid_argument("an apuPhase of " +
                                 std::to_string(static_cast<unsigned>(config.apuPhase)) +
                                 " is not 0 (a get) or 1 (a put)");
+  }
+  // NESdev wiki, "CPU", Frequencies: the CPU clock is the master clock divided by twelve,
+  // 236 250 000 / 132 Hz, and the decimator cannot produce more samples than cycles.
+  if (static_cast<std::uint64_t>(config.audioRate) * 132 > 236250000) {
+    throw std::invalid_argument("an audioRate of " + std::to_string(config.audioRate) +
+                                " is above the CPU clock; 1789772 is the most");
   }
   cartridge_ = makeCartridge(config.rom, CartridgeOverrides{.mapper = config.mapper,
                                                              .mirroring = config.mirroring,
@@ -171,27 +186,31 @@ void Nes::restore(const NesState& state) {
   }
   state_ = state;
   cpu_.restore(state.cpu);
+  // The frames queued belong to the run the restore replaces.
+  frames_.clear();
   reportSave();
 }
 
 void Nes::reset() {
   cpu_.reset();
-  // NESdev wiki, "CPU power up state", APU, the after-reset column; "APU", Status: a
-  // reset has the effect of writing $00 to $4015, and the DMC's direct load keeps its
-  // low bit. Every other register keeps its byte.
-  state_.apuRegs[0x15] = 0;
-  state_.apuRegs[0x11] = static_cast<std::uint8_t>(state_.apuRegs[0x11] & 0x01u);
+  // NESdev wiki, "CPU power up state", APU, the after-reset column; blargg's apu_reset
+  // programs: the last value written to $4017 is written again.
+  apuReset(state_.apu);
   // NESdev wiki, "CPU pinout", /RST: the line holds the CPU in reset with its pins
-  // released, and the CPU starts at the reset vector when it is let go, so a transfer
-  // under way ends here and the halted read is not resumed; the page latch keeps its
-  // byte.
+  // released, and the CPU starts at the reset vector when it is let go, so a transfer or
+  // a fetch under way ends here and the halted read is not resumed; the page latch keeps
+  // its byte.
   state_.dma.stage = DmaStage::Idle;
   state_.dma.index = 0;
+  state_.dma.dmc = DmcFetch::None;
+  state_.dma.dmcStage = DmcStage::Idle;
+  state_.dma.dmcDelay = 0;
   cpu_.setRdyLine(true);
   // NESdev wiki, "PPU power up state": a front-loading console's reset line resets the
   // PPU with the CPU.
   ppuReset(state_.ppu);
   state_.cpu = cpu_.state();
+  frames_.clear();
 }
 
 std::uint64_t Nes::step() {
@@ -218,6 +237,21 @@ void Nes::setJoypad(JoypadPort port, std::optional<Joypad> pad) noexcept {
 
 const std::optional<Joypad>& Nes::joypad(JoypadPort port) const noexcept {
   return state_.pads[static_cast<std::size_t>(port)];
+}
+
+std::vector<std::int16_t> Nes::takeFrames() {
+  // The queue is copied out and emptied, keeping its storage for the frames to come.
+  std::vector<std::int16_t> frames(frames_.begin(), frames_.end());
+  frames_.clear();
+  return frames;
+}
+
+std::size_t Nes::takeFrames(std::span<std::int16_t> into) noexcept {
+  const std::size_t count = std::min(into.size(), frames_.size());
+  const auto end = frames_.begin() + static_cast<std::ptrdiff_t>(count);
+  std::copy(frames_.begin(), end, into.begin());
+  frames_.erase(frames_.begin(), end);
+  return count;
 }
 
 std::size_t Nes::saveDataSize() const noexcept {
@@ -320,11 +354,10 @@ std::uint8_t Nes::busRead(std::uint16_t address, CycleKind kind, AccessSource so
       break;
     }
     case Target::ApuStatus:
-      // NESdev wiki, "APU", Status: bit 5 is open bus, and the other bits report
-      // counters and flags this machine does not hold; the external data bus is
-      // disconnected for the read, so the open bus keeps the value of the last cycle
-      // that did not read $4015.
-      value = static_cast<std::uint8_t>(state_.mdr & 0x20u);
+      // NESdev wiki, "APU", Status: the flags and the counters over bit 5 of the open bus;
+      // the external data bus is disconnected for the read, so the open bus keeps the
+      // value of the last cycle that did not read $4015.
+      value = apuReadStatus(state_.apu, state_.mdr);
       leavesBus = true;
       break;
     case Target::JoypadOne:
@@ -374,9 +407,9 @@ void Nes::busWrite(std::uint16_t address, std::uint8_t value, CycleKind kind,
     case Target::Apu:
     case Target::ApuStatus:
     case Target::JoypadTwo:
-      // The APU's registers are held as the bytes written to them (NESdev wiki, "2A03",
-      // 2A03 register map; "APU", Registers).
-      state_.apuRegs[address & 0x001Fu] = value;
+      // The APU takes the write in the half of the APU cycle it lands in (apu.h); $4017's
+      // write is the frame counter's.
+      apuWrite(state_.apu, address, value, state_.apuPhase);
       break;
     case Target::OamDma:
       // NESdev wiki, "DMA", OAM DMA: a transfer copies from the page most recently
@@ -419,54 +452,118 @@ void Nes::cpuCycle() {
 
 void Nes::busCycle() {
   Dma& dma = state_.dma;
+  const bool getCycle = state_.apuPhase == kGetHalf;
+  const DmcFetch wanted = apuDmcWantsFetch(state_.apu);
+  // The DMC's fetch, against the reader's request (NESdev wiki, "DMA", DMC DMA and Bugs):
+  // taken in the cycle after the reader asks, a load's halt attempted on the get cycle of
+  // the second APU cycle after the $4015 write and a reload's at once; dropped while the
+  // request lapses before the halt, abandoned after the halt cycle when it lapses then.
+  switch (dma.dmcStage) {
+    case DmcStage::Idle:
+      if (wanted != DmcFetch::None) {
+        dma.dmc = wanted;
+        dma.dmcStage = DmcStage::Halt;
+        dma.dmcDelay = wanted != DmcFetch::Load ? kReloadDelay
+                       : getCycle               ? kLoadDelayFromGet
+                                                : kLoadDelayFromPut;
+      }
+      break;
+    case DmcStage::Halt:
+      if (wanted == DmcFetch::None) {
+        dma.dmc = DmcFetch::None;
+        dma.dmcStage = DmcStage::Idle;
+        if (dma.stage == DmaStage::Idle) cpu_.setRdyLine(true);
+      } else if (dma.dmcDelay > 0) {
+        --dma.dmcDelay;
+      }
+      break;
+    case DmcStage::Dummy:
+      if (wanted == DmcFetch::None) {
+        dma.dmc = DmcFetch::None;
+        dma.dmcStage = DmcStage::Idle;
+        if (dma.stage == DmaStage::Idle) cpu_.setRdyLine(true);
+      }
+      break;
+    case DmcStage::Get:
+      break;
+  }
+  const bool dmcAttempt = dma.dmcStage == DmcStage::Halt && dma.dmcDelay == 0;
+  const bool dmcHolds = dma.dmcStage == DmcStage::Dummy || dma.dmcStage == DmcStage::Get;
+  const DmcStage dmcBefore = dma.dmcStage;
+
+  if (dma.dmcStage == DmcStage::Get && getCycle) {
+    // NESdev wiki, "DMA", DMC DMA during OAM DMA: the DMC's get takes the bus whatever the
+    // OAM unit was about to do; the transfer waits and aligns again. The read goes through
+    // the bus as the CPU's would, in the DMC's name.
+    const std::uint8_t byte =
+        busRead(state_.apu.dmc.address, CycleKind::DataRead, AccessSource::DmcDma);
+    apuDmcDeliver(state_.apu, byte);
+    dma.dmc = DmcFetch::None;
+    dma.dmcStage = DmcStage::Idle;
+    if (dma.stage == DmaStage::Idle) cpu_.setRdyLine(true);
+    return;
+  }
+
+  bool held = false;
   switch (dma.stage) {
     case DmaStage::Idle:
-      cpuCycle();
-      return;
     case DmaStage::Halt:
-      // NESdev wiki, "DMA", Behavior: the unit halts the CPU through RDY, which the CPU
-      // allows on a read cycle only; a write proceeds and the unit tries again on the
-      // next cycle. The halt cycle is the read the CPU then repeats.
-      cpu_.setRdyLine(false);
+      // NESdev wiki, "DMA", Behavior: a unit halts the CPU through RDY, which the CPU
+      // allows on a read cycle only; a write proceeds and the unit tries again on the next
+      // cycle. The halt cycle is the read the CPU then repeats, and so is every
+      // no-operation cycle of the DMC's fetch.
+      if (dma.stage == DmaStage::Halt || dmcAttempt || dmcHolds) cpu_.setRdyLine(false);
       cpuCycle();
-      if (cpu_.state().rdyHeld) dma.stage = DmaStage::Get;
-      return;
+      held = cpu_.state().rdyHeld;
+      if (held && dma.stage == DmaStage::Halt) dma.stage = DmaStage::Get;
+      break;
     case DmaStage::Get:
       // NESdev wiki, "DMA", Cadence and OAM DMA: the unit reads on a get cycle only, so
       // a put cycle before the read is an alignment cycle, on which the halted CPU
       // repeats its read (Register conflicts). The read goes through the bus as the
       // CPU's would, in the unit's name.
-      if (state_.apuPhase != kGetHalf) {
+      held = true;
+      if (!getCycle) {
         cpuCycle();
-        return;
+        break;
       }
       dma.byte = busRead(static_cast<std::uint16_t>((dma.page << 8) | dma.index),
                          CycleKind::DataRead, AccessSource::OamDma);
       dma.stage = DmaStage::Put;
-      return;
+      break;
     case DmaStage::Put:
       // NESdev wiki, "DMA", OAM DMA: the byte is written to $2004 on the put cycle that
-      // follows its get; after the 256th the CPU is released and performs the read it
-      // was halted on.
+      // follows its get; after the 256th the CPU is released, unless the DMC's fetch
+      // still holds it, and performs the read it was halted on.
+      held = true;
       busWrite(kOamDataPort, dma.byte, CycleKind::DataWrite, AccessSource::OamDma);
       if (dma.index == 255) {
         dma.index = 0;
         dma.stage = DmaStage::Idle;
-        cpu_.setRdyLine(true);
+        if (!dmcAttempt && !dmcHolds) cpu_.setRdyLine(true);
       } else {
         ++dma.index;
         dma.stage = DmaStage::Get;
       }
-      return;
+      break;
+  }
+
+  // NESdev wiki, "DMA", DMC DMA: after the halt cycle a dummy cycle, then the get, with an
+  // alignment cycle between when the dummy's successor is a put.
+  if (dmcAttempt && held) {
+    dma.dmcStage = DmcStage::Dummy;
+  } else if (dmcBefore == DmcStage::Dummy) {
+    dma.dmcStage = DmcStage::Get;
   }
 }
 
 bool Nes::machineCycle() {
   // The dots whose master cycle falls before M2 rises, then the cycle's one access,
   // then the dots that fall after it, which a read of $2002 under way is told (NESdev
-  // wiki, "PPU frame timing", VBL Flag Timing), then the NMI output as the CPU samples
-  // it at the cycle's end (NESdev wiki, "CPU interrupts", Detailed interrupt behavior:
-  // the edge detector polls the line during the second half of each cycle).
+  // wiki, "PPU frame timing", VBL Flag Timing), then the APU's tick and a cycle of its
+  // output, then the two lines as the CPU samples them at the cycle's end (NESdev wiki,
+  // "CPU interrupts", Detailed interrupt behavior: the edge and level detectors sample
+  // during the second half of each cycle).
   const std::uint64_t access = state_.master + kMasterCyclesToM2Rise;
   const std::uint64_t end = state_.master + kMasterCyclesPerCpuCycle;
   bool frameEnded = false;
@@ -480,7 +577,15 @@ bool Nes::machineCycle() {
     if (ppuTickDot(state_.ppu, statusRead_)) frameEnded = true;
     state_.dotClock += kMasterCyclesPerDot;
   }
+  apuTickCycle(state_.apu, state_.apuPhase);
+  // The output takes the level the tick left; the cartridge's level is 0, NROM carrying
+  // no sound hardware.
+  if (const std::optional<std::int16_t> sample =
+          apuDecimate(state_.apu, ApuInputs{.audioRate = audioRate_, .expansion = 0})) {
+    frames_.push_back(*sample);
+  }
   cpu_.setNmiLine(ppuNmiAsserted(state_.ppu));
+  cpu_.setIrqLine(apuIrqAsserted(state_.apu));
   state_.master = end;
   state_.apuPhase = static_cast<std::uint8_t>(state_.apuPhase ^ 1u);
   state_.cpu = cpu_.state();

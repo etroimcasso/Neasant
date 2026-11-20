@@ -268,14 +268,12 @@ TEST(InstrTiming, InstrTiming) {
 // Every instruction timed against the APU's length counter (its readme, "Requirements" and
 // "Internal operation").
 TEST(InstrTiming, Singles1InstrTiming) {
-  skipNeeding("instr_timing/rom_singles/1-instr_timing.nes",
-              "the APU's length counter, which is not built");
+  expectPass("instr_timing/rom_singles/1-instr_timing.nes", Report::Memory);
 }
 
 // The branches timed against the APU's length counter in eight situations (its readme).
 TEST(InstrTiming, Singles2BranchTiming) {
-  skipNeeding("instr_timing/rom_singles/2-branch_timing.nes",
-              "the APU's length counter, which is not built");
+  expectPass("instr_timing/rom_singles/2-branch_timing.nes", Report::Memory);
 }
 
 // The multi-test build, on mapper 1 (its readme, "Multi-tests").
@@ -303,8 +301,7 @@ TEST(InstrMisc, Singles03DummyReads) {
 // Dummy reads of every instruction that makes one, seen through the frame interrupt flag
 // (its readme).
 TEST(InstrMisc, Singles04DummyReadsApu) {
-  skipNeeding("instr_misc/rom_singles/04-dummy_reads_apu.nes",
-              "the APU's frame interrupt flag in $4015, which is not built");
+  expectPass("instr_misc/rom_singles/04-dummy_reads_apu.nes", Report::Memory);
 }
 
 // RAM kept across the reset line, which the program asks for and the harness gives (its

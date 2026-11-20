@@ -31,6 +31,7 @@ using neasant::buttonName;
 using neasant::buttons;
 using neasant::Dma;
 using neasant::DmaStage;
+using neasant::DmcStage;
 using neasant::Joypad;
 using neasant::JoypadPort;
 using neasant::Nes;
@@ -171,7 +172,7 @@ TEST(NesJoypad, PowerOnLeavesThePortsEmptyAndTheUnitIdle) {
   EXPECT_FALSE(s.clockLow[1]);
   EXPECT_TRUE(s.dma == Dma{});
   EXPECT_EQ(s.dma.stage, DmaStage::Idle);
-  EXPECT_FALSE(s.dma.dmcRequested);
+  EXPECT_EQ(s.dma.dmcStage, DmcStage::Idle);
 }
 
 TEST(NesJoypad, TheStrobeIsBitZeroOfAWriteAndFillsTheRegisterWhileHigh) {

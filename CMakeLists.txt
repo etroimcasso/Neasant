@@ -3,8 +3,9 @@ cmake_minimum_required(VERSION 3.24)
 project(neasant VERSION 0.0.0 LANGUAGES CXX)
 
 # ── Top-level detection ─────────────────────────────────────────────────────
-# The suite builds only when this is the top-level project; a parent that
-# vendors the library gets the library alone.
+# The suite and the command-line tools build only when this is the top-level
+# project; a parent that vendors the library gets the library alone, and turns
+# either on by its option.
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
   set(NEASANT_IS_TOP_LEVEL ON)
 else()
@@ -12,6 +13,7 @@ else()
 endif()
 
 option(NEASANT_BUILD_TESTS "Build the test suite" ${NEASANT_IS_TOP_LEVEL})
+option(NEASANT_BUILD_TOOLS "Build the command-line tools" ${NEASANT_IS_TOP_LEVEL})
 
 # Third-party reference data is never vendored. Each set is a path option the
 # tests read; an unset path registers the test and skips it with a reason.
@@ -20,6 +22,9 @@ set(NEASANT_NES6502_VECTORS "" CACHE PATH
 
 set(NEASANT_NES_TEST_ROMS "" CACHE PATH
     "Directory holding a clone of christopherpow/nes-test-roms")
+
+set(NEASANT_DMC_PROGRAMS_DIR "" CACHE PATH
+    "Directory holding Fiskbit's dmc_dma_start_test/ and dmc_dma_start_test_v2/ and Damian Yerrick's dpcmletterbox/, each with its ROM; empty skips their cases")
 
 # ── Build type ──────────────────────────────────────────────────────────────
 # A build is optimized by default. Debug is an explicit, temporary opt-in.
@@ -59,6 +64,7 @@ add_library(neasant STATIC
   src/nes/board.cpp
   src/mappers/nrom.cpp
   src/ppu/ppu.cpp
+  src/apu/apu.cpp
   src/nes/nes.cpp
 )
 add_library(neasant::neasant ALIAS neasant)
@@ -73,6 +79,13 @@ if(NOT MSVC)
   # Each function and datum in its own section so a consumer's final link
   # can drop what it never references.
   target_compile_options(neasant PRIVATE -ffunction-sections -fdata-sections)
+endif()
+
+# ── Tools ───────────────────────────────────────────────────────────────────
+# The command-line tools and the libraries behind them. The suite links those
+# libraries, so the tools build whenever it does.
+if(NEASANT_BUILD_TOOLS OR NEASANT_BUILD_TESTS)
+  add_subdirectory(tools)
 endif()
 
 # ── Tests ───────────────────────────────────────────────────────────────────

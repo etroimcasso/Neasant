@@ -46,8 +46,7 @@ constexpr std::uint16_t kPaletteBase = 0x3F00;
 
 // Drives the bits of the I/O bus `mask` names to `value`'s and recharges them: each
 // holds for the dots the machine was built with, then decays to zero (NESdev wiki,
-// "Open bus behavior", PPU open bus; NESdev forum, "Tests for ACE speedruns that rely on
-// PPU's internal open bus").
+// "Open bus behavior", PPU open bus; "PPU registers", MMIO registers).
 void driveBus(PpuState& state, std::uint8_t value, std::uint8_t mask,
               const PpuInputs& inputs) noexcept {
   state.ioLatch = static_cast<std::uint8_t>((state.ioLatch & ~mask) | (value & mask));
@@ -290,8 +289,8 @@ bool ppuTickDot(PpuState& state, bool statusRead) noexcept {
       state.warmingUp = false;
     }
   }
-  // NESdev forum, "Tests for ACE speedruns that rely on PPU's internal open bus": a bit
-  // of the I/O bus keeps its charge for a time after it is driven, then decays to zero.
+  // NESdev wiki, "PPU registers", MMIO registers: the I/O bus is a dynamic latch, and a
+  // bit keeps its charge for a time after it is driven, then decays to zero.
   for (std::size_t bit = 0; bit < 8; ++bit) {
     std::uint32_t& left = state.ioLatchDecay[bit];
     if (left != 0 && --left == 0) {

@@ -2,9 +2,10 @@
 
 // The NES as a machine around the 6502: the master clock and its budget, the bus as the
 // console decodes it, the 2 KB of work RAM, the open bus, the PPU with its ports, its
-// memories, its frame and its NMI output, the APU's registers as the bytes written to
-// them, the two controller ports with the pads plugged into them, the OAM DMA unit on
-// the CPU's RDY line, and the cartridge on its board behind the pins.
+// memories, its frame and its NMI output, the APU's frame counter, status register, five
+// channels and mixer with the samples a host drains, the two controller ports with the
+// pads plugged into them, the DMA unit on the CPU's RDY line, and the cartridge on its
+// board behind the pins.
 //
 // A machine is built from one config value and is at power-on from then: the CPU's
 // reset sequence is pending, every RAM holds the seed, and the first seven cycles run
@@ -12,9 +13,10 @@
 // master-cycle budget in whole machine cycles and carries the overshoot, so run(a) then
 // run(b) lands where run(a + b) does. One machine cycle is one CPU cycle, twelve master
 // cycles: the PPU runs every dot whose master cycle falls inside it, one every four,
-// the cycle's one bus access lands after the dots that fall before M2 rises, and the
-// CPU samples the PPU's NMI output as the cycle ends. The access is the CPU's, or the
-// OAM DMA unit's get or put while a transfer holds the bus.
+// the cycle's one bus access lands after the dots that fall before M2 rises, the APU
+// ticks and its output moves on a cycle, and the CPU samples the PPU's NMI output and the
+// APU's IRQ output as the cycle ends. The access is the CPU's, the OAM DMA unit's get or
+// put while a transfer holds the bus, or the DMC's sample fetch.
 //
 // The whole mutable machine is one state value: state() answers it by reference,
 // restore() replaces it, and a machine is copied whole. The image, the region and the
@@ -22,7 +24,10 @@
 // wants to see the bus rather than the state sets a bus observer, told every access as
 // it settles; a host keeping a save sets a save observer, told when the cartridge's
 // battery-backed PRG RAM has changed. Both are the host's objects, outside the state.
+// The sound leaves as frames, one sample of the console's one output each, which a host
+// drains with takeFrames(); they are output and outside the state too.
 
+#include "neasant/apu/apu.h"
 #include "neasant/cpu/cpu6502.h"
 #include "neasant/nes/board.h"
 #include "neasant/nes/cartridge.h"
@@ -42,7 +47,8 @@ namespace neasant {
 // How a machine is built. Every field has a default; the image is copied in, so the
 // span need not outlive the call. Construction throws std::invalid_argument, naming
 // what is supported instead, for a region other than NTSC, an alignment above 3, an
-// apuPhase above 1, and for everything makeCartridge and boardFor refuse.
+// apuPhase above 1, an audioRate above the CPU clock, and for everything makeCartridge
+// and boardFor refuse.
 struct NesConfig {
   std::span<const std::uint8_t> rom{};  // an iNES or NES 2.0 image, header included
   Region region = Region::Ntsc;         // NTSC; PAL and Dendy are refused
@@ -59,10 +65,11 @@ struct NesConfig {
   // state", Initial Register Values and the note on the VBL flag).
   bool vblankAtPowerOn = true;
   // Master cycles a bit of the PPU's I/O bus keeps the value an access drove onto it
-  // before it decays to zero; 0 keeps it for ever. The hardware's time varies with the
-  // chip and its warmth (NESdev forum, "Tests for ACE speedruns that rely on PPU's
-  // internal open bus"); the default is the thread's reading for an NTSC NES at
-  // power-on, $A00 counts of 15 CPU cycles, 38 400 CPU cycles.
+  // before it decays to zero; 0 keeps it for ever. The hardware's time is 3 to 30 ms,
+  // shorter as the PPU warms (NESdev wiki, "PPU registers", MMIO registers); the default
+  // is the result lidnariq's ppudecay test program reports on its author's NTSC NES at
+  // power-on, $A00 counts of 15 CPU cycles, 38 400 CPU cycles (its source and its
+  // author's description).
   std::uint32_t ppuOpenBusDecay = 460800;
   // The constant the CPU's ANE and LXA OR into the accumulator, which the hardware leaves
   // to the chip and its conditions (64doc, "6510/8502 Undocumented Commands"; No More
@@ -70,6 +77,11 @@ struct NesConfig {
   // instr_test-v5 expects LXA #imm to leave its operand in A and X, which only $FF gives
   // (its 03-immediate source: the checksum for ATX #n is TAX's).
   std::uint8_t unstableConstant = 0xFF;
+  // The rate the console's output is decimated to, in samples a second; 0 produces no
+  // samples. Each sample is the mean of the output over the CPU cycles it spans, and the
+  // samples come at exactly this rate against the master clock (apuDecimate in apu.h);
+  // takeFrames() drains them.
+  std::uint32_t audioRate = 48000;
   // The pattern every RAM is filled with at power-on, repeated from its start; empty
   // fills with $00. The hardware leaves RAM unreliable at power-on (NESdev wiki, "CPU
   // power up state", RAM contents) and the PPU's memories unspecified (NESdev wiki,
@@ -135,14 +147,14 @@ enum class JoypadPort : std::uint8_t { One, Two };
 
 // Who made a bus access. The CPU drives the bus on every cycle of its own, the cycles
 // it is halted on included; the OAM DMA unit makes its gets and puts while the CPU is
-// held off the bus (NESdev wiki, "DMA", Behavior). DmcDma names the DMC's sample
-// fetch; the DMC is not built, so no access carries it.
+// held off the bus (NESdev wiki, "DMA", Behavior). DmcDma is the DMC's sample fetch,
+// one get a byte (NESdev wiki, "DMA", DMC DMA).
 enum class AccessSource : std::uint8_t { Cpu, OamDma, DmcDma };
 
 // One access as the machine made it: the address driven, the byte that crossed the bus
 // (what the bus answered for a read, what the source drove for a write), which way it
 // went, what the cycle was for as the CPU core drives it (CycleKind, cpu6502.h), and
-// who made it. The OAM DMA unit's accesses are plain data reads and writes; a read the
+// who made it. The DMA unit's accesses are plain data reads and writes; a read the
 // halted CPU repeats carries CycleKind::Halted.
 struct BusAccess {
   std::uint16_t address = 0;
@@ -155,10 +167,11 @@ struct BusAccess {
 
 // What a machine tells about every access it makes, one each machine cycle. The 6502
 // drives the bus on every cycle, so the accesses from one opcode fetch to the next are
-// that instruction's cycles, together with any an OAM DMA transfer puts among them: the
-// reads the halted CPU repeats, of kind CycleKind::Halted, and the unit's gets and puts,
-// of source AccessSource::OamDma. From the stream a host derives which addresses were
-// read and written, in what order, with what byte, and by whom.
+// that instruction's cycles, together with any an OAM DMA transfer or a DMC fetch puts
+// among them: the reads the halted CPU repeats, of kind CycleKind::Halted, the OAM
+// unit's gets and puts, of source AccessSource::OamDma, and the DMC's gets, of source
+// AccessSource::DmcDma. From the stream a host derives which addresses were read and
+// written, in what order, with what byte, and by whom.
 class BusObserver {
  public:
   virtual ~BusObserver() = default;
@@ -203,7 +216,15 @@ enum class DmaStage : std::uint8_t {
   Put,   // this cycle writes the byte read to $2004
 };
 
-// The OAM DMA unit's state.
+// Where the DMA unit is in a DMC sample fetch (NESdev wiki, "DMA", DMC DMA).
+enum class DmcStage : std::uint8_t {
+  Idle,   // no fetch
+  Halt,   // the fetch is taken: the unit waits out a load's delay, then holds RDY low until a read cycle halts the CPU
+  Dummy,  // the cycle after the halt cycle: the unit makes no access
+  Get,    // the next get cycle reads the sample byte; a put cycle before it is an alignment cycle
+};
+
+// The DMA unit's state: the OAM transfer and the DMC fetch it carries, over one RDY line.
 struct Dma {
   // The page a transfer copies from: the byte most recently written to $4014 (NESdev
   // wiki, "DMA", OAM DMA).
@@ -211,10 +232,15 @@ struct Dma {
   DmaStage stage = DmaStage::Idle;
   std::uint8_t index = 0;  // the byte of the page the next get reads
   std::uint8_t byte = 0;   // the byte the last get read, carried to its put
-  // Whether the DMC has a sample byte to fetch, whose get takes precedence over the OAM
-  // unit's and pauses it (NESdev wiki, "DMA", DMC DMA during OAM DMA). The DMC is not
-  // built, so nothing sets it.
-  bool dmcRequested = false;
+  // The DMC fetch the unit is carrying out, taken from the APU's reader in the cycle after
+  // it asked, and where the unit is in it. The fetch's get takes precedence over the OAM
+  // unit's and pauses the transfer (NESdev wiki, "DMA", DMC DMA during OAM DMA).
+  DmcFetch dmc = DmcFetch::None;
+  DmcStage dmcStage = DmcStage::Idle;
+  // Cycles before a load's halt is attempted: the get cycle of the second APU cycle after
+  // the $4015 write, two cycles on from the get cycle after the write and three from a
+  // put (NESdev wiki, "DMA", DMC DMA).
+  std::uint8_t dmcDelay = 0;
   [[nodiscard]] bool operator==(const Dma&) const noexcept = default;
 };
 
@@ -243,10 +269,9 @@ struct NesState {
   // Which half of the APU cycle the next machine cycle is, 0 a get and 1 a put; it
   // toggles every machine cycle (NESdev wiki, "DMA", Cadence).
   std::uint8_t apuPhase = 0;
-  // $4000-$4017 as last written, for the registers the APU holds: $4000-$4013, $4015
-  // and $4017. The bytes at $4014 and $4016 are never written: those addresses are the
-  // OAM DMA page and the controller strobe, held below.
-  std::array<std::uint8_t, 24> apuRegs{};
+  // The APU: its frame counter, its length counters, its channels, its status, its IRQ
+  // line, its output stage and its output's place in the sample under way.
+  ApuState apu{};
   PpuState ppu{};
   // The cartridge's PRG RAM and CHR RAM, each sized at construction from the header or
   // the config and never resized; the PRG RAM is the save when the cartridge has a
@@ -278,14 +303,15 @@ struct NesState {
 class Nes {
  public:
   // Builds the machine at power-on: the CPU with its reset sequence pending, every RAM
-  // holding the seed, the APU's registers zero (NESdev wiki, "CPU power up state",
-  // APU), the open bus zero, the PPU with its registers at their power-on values, its
+  // holding the seed, the APU at its power-on state (ApuState's defaults), the open bus
+  // zero, the PPU with its registers at their power-on values, its
   // vertical-blank flag as the config says, its warm-up window open and its counter at
   // the first dot (NESdev wiki, "PPU power up state"), the ports empty with their
-  // registers clear, the OAM DMA unit idle, no observer set, and the master counter at
-  // zero. The first seven cycles run the reset sequence to the reset vector. Throws
-  // std::invalid_argument as NesConfig says. A machine is copied and moved whole: the
-  // state, the image, the board and the observer pointers go with it.
+  // registers clear, the DMA unit idle, no observer set, no frame queued, and the master
+  // counter at zero. The first seven cycles run the reset sequence to the reset vector.
+  // Throws std::invalid_argument as NesConfig says. A machine is copied and moved whole:
+  // the state, the image, the board, the observer pointers and the frames not yet
+  // drained go with it.
   explicit Nes(NesConfig config);
 
   // The whole machine as a value. state() answers the machine's own state without
@@ -295,9 +321,9 @@ class Nes {
   // std::invalid_argument, and leaves the machine as it was, for a state whose PRG RAM
   // or CHR RAM is another size than this machine's or whose board is another kind:
   // those are the cartridge's, fixed for the machine's life, so such a state is a
-  // snapshot of another cartridge. A restore that leaves the save other than as the
-  // save observer last received it is reported to that observer, with the state in
-  // place.
+  // snapshot of another cartridge. A restore discards the frames not yet drained, and
+  // one that leaves the save other than as the save observer last received it is
+  // reported to that observer, with the state in place.
   [[nodiscard]] const NesState& state() const noexcept { return state_; }
   void restore(const NesState& state);
 
@@ -305,33 +331,39 @@ class Nes {
   // together as a front-loading console's does (NESdev wiki, "PPU power up state"). The
   // CPU's reset sequence is pending again and runs on the next cycles, keeping A, X, Y
   // and every flag but I, and a jammed core is released (NESdev wiki, "CPU power up
-  // state", CPU). A transfer the OAM DMA unit has under way ends there and the CPU is
-  // released (NESdev wiki, "CPU pinout", /RST). The APU's status register goes to 0 and
-  // the DMC's direct load keeps its low bit; every other APU register keeps its byte
-  // (NESdev wiki, "CPU power up state", APU; "APU", Status). The PPU is as ppuReset
-  // leaves it: its counter back at the top of the picture and its warm-up window open,
-  // its flag, its address and its memories kept. Work RAM, PRG RAM, CHR RAM, the open
+  // state", CPU). A transfer or a fetch the DMA unit has under way ends there and the CPU
+  // is released (NESdev wiki, "CPU pinout", /RST). The APU is as apuReset leaves it:
+  // every channel disabled with its counter at 0, the DMC's sample stopped with its
+  // level's low bit kept, the frame interrupt flag clear, the triangle at its first step,
+  // the sequence restarting in the mode last written. The PPU is as ppuReset leaves it:
+  // its counter back at the top of the picture and its warm-up window open, its flag, its
+  // address and its memories kept. Work RAM, PRG RAM, CHR RAM, the open
   // bus, the strobe, the shift registers, the pads, the DMA page, the master counters
-  // and the observers keep what they hold. Call it between step() and run() calls.
+  // and the observers keep what they hold, and the output keeps its place in the sample
+  // under way; the frames not yet drained are discarded. Call it between step() and
+  // run() calls.
   void reset();
 
   // The region the machine was built for, the CPU-PPU alignment it was built with, the
-  // I/O bus decay it was built with, in master cycles, and the constant its CPU's ANE and
-  // LXA OR into the accumulator, all fixed for its life like the image.
+  // I/O bus decay it was built with, in master cycles, the constant its CPU's ANE and LXA
+  // OR into the accumulator, and the output rate it was built with, all fixed for its life
+  // like the image.
   [[nodiscard]] Region region() const noexcept { return region_; }
   [[nodiscard]] std::uint8_t alignment() const noexcept { return alignment_; }
   [[nodiscard]] std::uint32_t ppuOpenBusDecay() const noexcept { return ppuOpenBusDecay_; }
   [[nodiscard]] std::uint8_t unstableConstant() const noexcept { return cpu_.unstableConstant(); }
+  [[nodiscard]] std::uint32_t audioRate() const noexcept { return audioRate_; }
 
-  // Runs one machine cycle, one CPU cycle, and returns its master cycles, twelve: the
-  // PPU runs the dots that fall inside the cycle, one bus access lands among them, and
-  // the CPU samples the PPU's NMI output as the cycle ends. The access is the CPU's;
-  // while the OAM DMA unit holds the bus it is the unit's get or put, and on the unit's
-  // halt and alignment cycles the halted CPU repeats its read. A jammed core repeats
-  // its idle read. A fresh machine's first seven cycles are the reset sequence. The
-  // overshoot run() carries is unchanged. A cycle that ends a frame is followed by the
-  // save observer's report, which may throw (SaveObserver) after the cycle and its
-  // twelve master cycles are accounted for.
+  // Runs one machine cycle, one CPU cycle, and returns its master cycles, twelve: the PPU
+  // runs the dots that fall inside the cycle, one bus access lands among them, the APU
+  // ticks and its output moves on a cycle, queueing a frame when one completes, and the
+  // CPU samples the PPU's NMI output and the APU's IRQ output as the cycle ends. The
+  // access is the CPU's; while the DMA unit holds the bus it is the OAM transfer's get or
+  // put or the DMC's fetch, and on the unit's halt, dummy and alignment cycles the halted
+  // CPU repeats its read. A jammed core repeats its idle read. A fresh machine's first
+  // seven cycles are the reset sequence. The overshoot run() carries is unchanged. A
+  // cycle that ends a frame is followed by the save observer's report, which may throw
+  // (SaveObserver) after the cycle and its twelve master cycles are accounted for.
   std::uint64_t step();
 
   // Runs whole machine cycles until the machine stands at least `budget` master cycles
@@ -373,6 +405,23 @@ class Nes {
   // The save's size: the PRG RAM's on a cartridge with a battery, 0 on one without. A
   // save observer is handed this many bytes.
   [[nodiscard]] std::size_t saveDataSize() const noexcept;
+
+  // The frames the APU has produced since the last drain, oldest first, leaving none
+  // queued. One frame is one sample of the console's one output: the mixer's level
+  // through the console's output filters, resting at 0 and within -32 768 and 32 767,
+  // averaged down to the config's audioRate (apuMix, apuFilter and apuDecimate in
+  // apu.h), 798 or 799 of them in the 357 368 master cycles of one picture at 48 000 Hz.
+  // A machine queues frames as its cycles run, so a caller drains periodically to bound
+  // the queue. Frames are output, not state: a snapshot does not carry them, and
+  // restore() and reset() discard any that are pending. A machine built with an
+  // audioRate of 0 produces none.
+  [[nodiscard]] std::vector<std::int16_t> takeFrames();
+
+  // The frames produced since the last drain, into the caller's own storage, and how
+  // many were written. Frames past the end of `into` stay queued for the next drain, and
+  // nothing is allocated, so a host draining on a callback that must not allocate uses
+  // this form.
+  [[nodiscard]] std::size_t takeFrames(std::span<std::int16_t> into) noexcept;
 
  private:
   // The CPU's view of the console: the two members the core's bus concept names, each
@@ -425,11 +474,12 @@ class Nes {
   [[nodiscard]] std::uint8_t joypadBit(std::size_t port) noexcept;
 
   // One machine cycle: the dots that fall before M2 rises, the cycle's one bus access,
-  // the dots that fall after, the NMI line, then the counters. Answers whether one of
-  // its dots ended a frame.
+  // the dots that fall after, the APU's tick and its output's cycle, the NMI and IRQ
+  // lines, then the counters. Answers whether one of its dots ended a frame.
   bool machineCycle();
-  // The cycle's one bus access: the OAM DMA unit's get or put while a transfer holds
-  // the bus, otherwise the CPU's.
+  // The cycle's one bus access: the DMC's fetch on its get cycle, else the OAM DMA
+  // unit's get or put while a transfer holds the bus, else the CPU's, held when a unit
+  // halts or holds it.
   void busCycle();
   // The CPU's cycle on the bus, halted or not.
   void cpuCycle();
@@ -449,12 +499,16 @@ class Nes {
   Region region_;
   std::uint8_t alignment_;
   std::uint32_t ppuOpenBusDecay_;
+  std::uint32_t audioRate_;
   BusObserver* observer_ = nullptr;
   SaveObserver* saveObserver_ = nullptr;
   // The save as the save observer last received it: the seed at construction, then
   // what each report hands over. Sized with the PRG RAM on a cartridge with a battery,
   // empty on one without; the host's view of the save, not part of the state.
   std::vector<std::uint8_t> saveReference_;
+  // The frames produced and not yet drained, oldest first: output, not part of the
+  // state. The queue grows as frames are produced and keeps its storage across a drain.
+  std::vector<std::int16_t> frames_;
   // Whether the cycle under way is reading $2002, which the dots that tick after the
   // read are told. Meaningful inside one machineCycle call and not part of the state.
   bool statusRead_ = false;

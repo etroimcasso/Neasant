@@ -110,3 +110,69 @@ neasant_add_test(nes_observers_test nes/observers_test.cpp)
 neasant_add_test(nes_blargg_cpu_test nes/blargg_cpu_test.cpp nes/rom_harness.cpp)
 target_compile_definitions(nes_blargg_cpu_test PRIVATE
   NEASANT_NES_TEST_ROMS="${NEASANT_NES_TEST_ROMS}")
+
+# The APU's frame counter, length counters and status: the two sequences' steps from a
+# write on either APU half, the flag's three ticks and the status read against them, the
+# IRQ line one cycle behind the flag, the restart with its delay and its immediate clocks,
+# the length table, the halt bit a tick late, the reload against a clock, the enable bits,
+# power-on and reset; and blargg's APU, reset, frame-counter and interrupt programs run on
+# the machine, read out of the state value. The harness and the authored-image helpers are
+# the machine tests'.
+neasant_add_test(apu_frame_test apu/frame_test.cpp nes/rom_harness.cpp)
+target_include_directories(apu_frame_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
+target_compile_definitions(apu_frame_test PRIVATE
+  NEASANT_NES_TEST_ROMS="${NEASANT_NES_TEST_ROMS}")
+
+# The APU's pulse, triangle and noise channels: the pulses' timers on the get half, the four
+# duty waveforms, the sequencer's restart and the period floor; the envelopes' start, divider,
+# loop and constant volume; the sweeps' two negates, their divider and reload, the target
+# that silences and the period it leaves; the quarter- and half-frame clocks on those units
+# in both sequences; the triangle's 32 steps, its linear counter and the counters that stop
+# it; the noise's shift register in both modes, its period table and its output; reset and
+# the enables; and two programs on the machine. The authored-image helpers are the machine
+# tests'.
+neasant_add_test(apu_channels_test apu/channels_test.cpp)
+target_include_directories(apu_channels_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
+
+# The DMC: its registers, the reader's restart, address and count, the output unit's level
+# steps and clamps, the rate table and the timer's half, the loop, the interrupt flag with
+# its two clears and the IRQ line, the request that lapses, reset; on the machine the load's
+# halt on the third or fourth cycle, a write delaying it, the reload's four cycles, the
+# interrupt reaching the CPU, the fetch inside an OAM transfer and at its end, the fetch
+# abandoned after its halt cycle, reset and a snapshot mid-fetch; and blargg's and Fiskbit's
+# DMC programs on the machine, read out of the state value and through the bus observer.
+# The harness and the authored-image helpers are the machine tests'.
+neasant_add_test(apu_dmc_test apu/dmc_test.cpp nes/rom_harness.cpp)
+target_include_directories(apu_dmc_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
+target_compile_definitions(apu_dmc_test PRIVATE
+  NEASANT_NES_TEST_ROMS="${NEASANT_NES_TEST_ROMS}"
+  NEASANT_DMC_PROGRAMS_DIR="${NEASANT_DMC_PROGRAMS_DIR}")
+
+# The APU's output: the mixer's level for each channel alone and together against the mixer
+# page's two formulas, the cartridge's level added and held at a sample's top; the
+# decimator's 37 and 38 cycles a sample at 48 000 Hz, its mean, its highest rate and a rate
+# of 0; on the machine the level a write leaves in the first frame, the frames of a picture,
+# the two drains, the frames a restore and a reset discard, a copy's frames and two machines'
+# equal frames; and blargg's mixer programs on the machine, each measured in its drained
+# frames. The harness and the authored-image helpers are the machine tests'.
+neasant_add_test(apu_mixer_test apu/mixer_test.cpp nes/rom_harness.cpp)
+target_include_directories(apu_mixer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
+target_compile_definitions(apu_mixer_test PRIVATE
+  NEASANT_NES_TEST_ROMS="${NEASANT_NES_TEST_ROMS}")
+
+# The console's output stage: the level it holds at power-on, one cycle's move of each
+# filter, a step's rise and decay, a standing level settling to 0, a fall, a square wave's
+# sag, the answer held within a sample and the reset keeping the stage, driven through
+# apu.h; on the machine an idle program's silence, the stage in a snapshot, across a reset
+# and at a rate of 0. The authored-image helpers are the machine tests'.
+neasant_add_test(apu_filter_test apu/filter_test.cpp)
+target_include_directories(apu_filter_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
+
+# The render tool: the WAV writer's header byte by byte for no samples and for some, at
+# two rates, and its samples in order, low byte first; and a cartridge rendered as
+# nes_render renders it: the run queueing exactly the samples asked for at four rates, the
+# same bytes from the same image twice, and an authored beep whose period is the one its
+# registers set. The authored-image helpers are the machine tests'.
+neasant_add_test(render_test tools/render_test.cpp)
+target_link_libraries(render_test PRIVATE neasant_render)
+target_include_directories(render_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
