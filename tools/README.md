@@ -6,7 +6,7 @@ that wants the same capability links that target and calls what the tool calls.
 
 | Directory | Library | Command line | Page |
 |---|---|---|---|
-| [`render/`](render/README.md) | `neasant_render` | `nes_render` | [nes-machine.md](../docs/nes-machine.md#the-apu) |
+| [`render/`](render/README.md) | `neasant_render` | `nes_render` | [apu.md](../docs/apu.md) |
 
 ## Contents
 

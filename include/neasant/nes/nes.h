@@ -354,16 +354,16 @@ class Nes {
   [[nodiscard]] std::uint8_t unstableConstant() const noexcept { return cpu_.unstableConstant(); }
   [[nodiscard]] std::uint32_t audioRate() const noexcept { return audioRate_; }
 
-  // Runs one machine cycle, one CPU cycle, and returns its master cycles, twelve: the
-  // PPU runs the dots that fall inside the cycle, one bus access lands among them, the
-  // APU ticks and its output moves on a cycle, queueing a frame when one completes, and
-  // the CPU samples the PPU's NMI output and the APU's IRQ output as the cycle ends. The access is the CPU's; while the DMA unit holds the bus it is the OAM
-  // transfer's get or put or the DMC's fetch, and on the unit's halt, dummy and
-  // alignment cycles the halted CPU repeats its read. A jammed core repeats
-  // its idle read. A fresh machine's first seven cycles are the reset sequence. The
-  // overshoot run() carries is unchanged. A cycle that ends a frame is followed by the
-  // save observer's report, which may throw (SaveObserver) after the cycle and its
-  // twelve master cycles are accounted for.
+  // Runs one machine cycle, one CPU cycle, and returns its master cycles, twelve: the PPU
+  // runs the dots that fall inside the cycle, one bus access lands among them, the APU
+  // ticks and its output moves on a cycle, queueing a frame when one completes, and the
+  // CPU samples the PPU's NMI output and the APU's IRQ output as the cycle ends. The
+  // access is the CPU's; while the DMA unit holds the bus it is the OAM transfer's get or
+  // put or the DMC's fetch, and on the unit's halt, dummy and alignment cycles the halted
+  // CPU repeats its read. A jammed core repeats its idle read. A fresh machine's first
+  // seven cycles are the reset sequence. The overshoot run() carries is unchanged. A
+  // cycle that ends a frame is followed by the save observer's report, which may throw
+  // (SaveObserver) after the cycle and its twelve master cycles are accounted for.
   std::uint64_t step();
 
   // Runs whole machine cycles until the machine stands at least `budget` master cycles

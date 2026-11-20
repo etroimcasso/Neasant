@@ -1,8 +1,8 @@
 # Render
 
 `nes_render` runs a cartridge on the [NES machine](../../docs/nes-machine.md) from power-on
-and writes what its APU plays as a WAV file. Beside it is the file-format piece it uses, the
-WAV writer.
+and writes what its [APU](../../docs/apu.md) plays as a WAV file. Beside it is the file-format
+piece it uses, the WAV writer.
 
 ## Contents
 
@@ -35,7 +35,7 @@ nes_render game.nes --seconds 30 -o game.wav
 The output is a canonical PCM WAV, 16-bit signed, one channel: the machine's frames written
 sample for sample, with no resampling, dither or gain. Each sample is the console's output,
 the mixer's level through the NES's output filters, averaged over the CPU cycles it spans
-([The APU](../../docs/nes-machine.md#the-apu)). The output rests at 0: a file opens at 0,
+([the APU's output](../../docs/apu.md#the-output)). The output rests at 0: a file opens at 0,
 and a level that stands is taken away within 20 ms.
 
 The command exits 0 with the file written. It exits 1, saying which on stderr, when the
@@ -90,7 +90,8 @@ The library target is `neasant_render`; `tools/` is on its public include path.
 
 ## See also
 
-- [docs/nes-machine.md](../../docs/nes-machine.md): the machine a cartridge is run on, its
-  mixer and the frames a host drains.
+- [docs/nes-machine.md](../../docs/nes-machine.md): the machine a cartridge is run on and the
+  frames a host drains.
+- [docs/apu.md](../../docs/apu.md): the APU, its mixer and the console's output filters.
 - [docs/nes-cartridge.md](../../docs/nes-cartridge.md): the image and its header.
 - [tools/README.md](../README.md): every tool and how they build.

@@ -1016,7 +1016,7 @@ TEST(ApuTest, Singles8DmcRates) {
 }
 
 // "DMC DMA during $2007 read causes 2-3 extra $2007 reads before real read", its two CRCs
-// 159A7A8F and 5E3DF9C4 by alignment (its readme). The machine makes three extra reads under
+// 159A7A8F and 5E3DF9C4 by alignment (its source). The machine makes three extra reads under
 // every alignment and both halves, printing 5E3DF9C4; 20 frames.
 TEST(DmcDmaDuringRead4, Dma2007Read) {
   const std::optional<std::string> get = screenCrc("dmc_dma_during_read4/dma_2007_read.nes", kGet);
@@ -1027,26 +1027,26 @@ TEST(DmcDmaDuringRead4, Dma2007Read) {
   EXPECT_EQ(*put, "5E3DF9C4");
 }
 
-// "DMC DMA during $2007 write has no effect" (its readme); 24 frames.
+// "DMC DMA during $2007 write has no effect" (its source); 24 frames.
 TEST(DmcDmaDuringRead4, Dma2007Write) {
   expectPass("dmc_dma_during_read4/dma_2007_write.nes", Report::Screen);
 }
 
-// "DMC DMA during $4016 read causes extra $4016 read", printing 08 08 07 08 08 (its readme).
+// "DMC DMA during $4016 read causes extra $4016 read", printing 08 08 07 08 08 (its source).
 // The pad its `end` routine reads to its ninth bit, which answers 1; 12 frames.
 TEST(DmcDmaDuringRead4, Dma4016Read) {
   expectPass("dmc_dma_during_read4/dma_4016_read.nes", Report::Screen, true);
 }
 
 // "Double read of $2007 sometimes ignores extra read, and puts odd things into buffer", its
-// four CRCs by alignment (its readme), with no DMA at all; the machine prints D84F6815, its
+// four CRCs by alignment (its source), with no DMA at all; the machine prints D84F6815, its
 // $2007 read on adjacent cycles two full reads.
 TEST(DmcDmaDuringRead4, Double2007Read) {
   skipNeeding("dmc_dma_during_read4/double_2007_read.nes",
               "the PPU's read of $2007 on adjacent cycles, which is not built");
 }
 
-// "Read of $2007 just before write behaves normally" (its readme); 12 frames.
+// "Read of $2007 just before write behaves normally" (its source); 12 frames.
 TEST(DmcDmaDuringRead4, ReadWrite2007) {
   expectPass("dmc_dma_during_read4/read_write_2007.nes", Report::Screen);
 }

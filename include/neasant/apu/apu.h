@@ -257,14 +257,15 @@ struct ApuInputs {
   std::int16_t expansion = 0;
 };
 
-// The chip's whole mutable state as a value: snapshot by copy, restore by assignment.
-// The defaults are the power-on state (NESdev wiki, "CPU power up state", APU): every
+// The chip's whole mutable state as a value: snapshot by copy, restore by assignment. The
+// defaults are the power-on state (NESdev wiki, "CPU power up state", APU): every
 // register 0 and every channel disabled with its counter at 0, the triangle at its first
 // step, the noise's shift register 1, the DMC silent with its level 0, mode 0 with the
 // interrupt enabled, the flag clear, and the sequence restarting at the first machine
-// cycle's tick, which puts its origin nine cycles before the first instruction, the
-// figure blargg's apu_reset programs measure as usual; the output stage settled on the
-// level the DACs start at, and the output's first sample not yet begun.
+// cycle's tick, where a write of $00 to $4017 nine cycles before the first instruction
+// would put its origin, the figure blargg's apu_reset programs measure as usual; the
+// output stage settled on the level the DACs start at, and the output's first sample not
+// yet begun.
 struct ApuState {
   // Pulse 1, pulse 2, the triangle and the noise, in $4015's bit order.
   std::array<ApuLengthCounter, 4> length{};
@@ -285,10 +286,10 @@ struct ApuState {
   // (NESdev wiki, "APU Frame Counter"; "APU", Status).
   bool frameInterrupt = false;
   // The IRQ line as the CPU samples it: the frame interrupt flag with the inhibit clear,
-  // or the DMC's interrupt flag, as they stood when the current tick began. A set
-  // reaches the line one cycle after a read of $4015 sees it (NESdev wiki, "CPU interrupts", Detailed interrupt behavior: the level
-  // detector samples the line during the second half of a cycle and raises its signal the
-  // cycle after).
+  // or the DMC's interrupt flag, as they stood when the current tick began. A set reaches
+  // the line one cycle after a read of $4015 sees it (NESdev wiki, "CPU interrupts",
+  // Detailed interrupt behavior: the level detector samples the line during the second
+  // half of a cycle and raises its signal the cycle after).
   bool irqLine = false;
   // CPU cycles since the sequence's origin, as the last tick left it: the steps fall at
   // 7457, 14913, 22371 and 29829 or 37281, and the count returns to 0 at 29830 (4-step)
@@ -320,24 +321,24 @@ struct ApuState {
 // Noise", Operation).
 void apuReset(ApuState& state) noexcept;
 
-// A CPU write to `address`, one of $4000-$4013, $4015 or $4017, in a cycle whose APU
-// half is `apuPhase`, 0 a get and 1 a put. $4000, $4004 and $400C take their channel's
-// duty, halt bit, constant-volume bit and volume; $4001 and $4005 the sweep's fields,
-// setting its reload flag; $4002, $4006 and $400A the low eight bits of a timer's
-// period; $4003, $4007 and $400B the high three, and $400E the noise's mode and period
-// index. $4010 takes the DMC's interrupt enable, loop flag and rate, clearing the
-// interrupt flag when the enable is written clear; $4011 its level; $4012 and $4013 its
-// sample address and length. $4008 takes the triangle's halt bit and the linear
-// counter's reload value. A write to a fourth register, $4003, $4007, $400B or $400F,
-// also loads the channel's length counter from the table at the cycle's tick while the
-// channel is enabled, and whether or not it is enabled restarts a pulse's sequencer and
-// its envelope, sets the triangle's linear reload flag, or restarts the noise's
+// A CPU write to `address`, one of $4000-$4013, $4015 or $4017, in a cycle whose APU half
+// is `apuPhase`, 0 a get and 1 a put. $4000, $4004 and $400C take their channel's halt
+// bit, constant-volume bit and volume, and $4000 and $4004 their pulse's duty; $4001 and
+// $4005 the sweep's fields, setting its reload flag; $4002, $4006 and $400A the low eight
+// bits of a timer's period; $4003, $4007 and $400B the high three, and $400E the noise's
+// mode and period index. $4010 takes the DMC's interrupt enable, loop flag and rate,
+// clearing the interrupt flag when the enable is written clear; $4011 its level; $4012
+// and $4013 its sample address and length. $4008 takes the triangle's halt bit and the
+// linear counter's reload value. A write to a fourth register, $4003, $4007, $400B or
+// $400F, also loads the channel's length counter from the table at the cycle's tick while
+// the channel is enabled, and whether or not it is enabled restarts a pulse's sequencer
+// and its envelope, sets the triangle's linear reload flag, or restarts the noise's
 // envelope. $4015 sets the four enables, clearing the counter of each channel it
 // disables; its bit 4 clear stops the DMC's sample and set restarts one whose bytes
 // remaining are 0, asking for the first byte at once when the buffer is empty, and the
 // write clears the DMC's interrupt flag; $4017 sets the inhibit bit, clearing the flag
-// when it is set, and schedules the sequence's restart two cycles on from a put cycle
-// and three from a get. Every other address is dropped.
+// when it is set, and schedules the sequence's restart two cycles on from a put cycle and
+// three from a get. Every other address is dropped.
 void apuWrite(ApuState& state, std::uint16_t address, std::uint8_t value,
               std::uint8_t apuPhase) noexcept;
 
