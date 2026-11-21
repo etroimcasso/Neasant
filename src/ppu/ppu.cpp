@@ -15,6 +15,13 @@ constexpr std::uint16_t kPreRenderScanline = 261;
 constexpr std::uint16_t kFlagDot = 1;
 constexpr std::uint16_t kSkippedFromDot = 339;
 
+// The dots a write to $2001 takes to reach the frame counter: the third dot after the
+// write's access is the first that reads it. blargg's ppu_vbl_nmi, 10-even_odd_timing,
+// enables and disables the background one PPU clock apart around the odd frame's last
+// dots and reports which write the skip followed; NESdev wiki, "PPU registers", PPUMASK,
+// Rendering control, gives approximately 3-4 dots after the write.
+constexpr std::uint8_t kMaskLagDots = 3;
+
 // The 14 bits of the address space a $2007 access reaches, and where the palette
 // begins in it (NESdev wiki, "PPU memory map"; "PPU scrolling", PPU internal
 // registers).
@@ -22,9 +29,15 @@ constexpr std::uint16_t kAddressMask = 0x3FFF;
 constexpr std::uint16_t kPaletteBase = 0x3F00;
 
 // NESdev wiki, "PPU registers", PPUMASK, Rendering control: rendering is enabled while
-// either of bits 4 and 3 is.
-[[nodiscard]] bool renderingEnabled(const PpuState& state) noexcept {
-  return (state.mask & 0x18u) != 0;
+// either of bits 4 and 3 of $2001 is.
+[[nodiscard]] bool renderingEnabled(std::uint8_t mask) noexcept {
+  return (mask & 0x18u) != 0;
+}
+
+// Rendering as the frame counter reads it: by `maskBefore` while a write to $2001 is
+// short of its third dot, by $2001 otherwise.
+[[nodiscard]] bool renderingAtTheCounter(const PpuState& state) noexcept {
+  return renderingEnabled(state.maskLag != 0 ? state.maskBefore : state.mask);
 }
 
 // The palette entry an address in $3F00-$3FFF reaches: the 32 entries repeat through
@@ -42,6 +55,14 @@ constexpr std::uint16_t kPaletteBase = 0x3F00;
 [[nodiscard]] std::uint8_t paletteRead(const PpuState& state, std::uint16_t address) noexcept {
   const std::uint8_t entry = state.palette[paletteIndex(address)];
   return (state.mask & 0x01u) != 0 ? static_cast<std::uint8_t>(entry & 0x30u) : entry;
+}
+
+// The byte OAM answers at `address`. A sprite's byte 2 is five bits in the chip, and its
+// bits 4-2 read back as 0; every other byte is answered whole (NESdev wiki, "PPU OAM",
+// Byte 2 - Attributes).
+[[nodiscard]] std::uint8_t oamByte(const PpuState& state, std::uint8_t address) noexcept {
+  const std::uint8_t byte = state.oam[address];
+  return (address & 0x03u) == 0x02u ? static_cast<std::uint8_t>(byte & 0xE3u) : byte;
 }
 
 // Drives the bits of the I/O bus `mask` names to `value`'s and recharges them: each
@@ -100,6 +121,8 @@ void ppuReset(PpuState& state) noexcept {
   // of the picture on an even frame.
   state.ctrl = 0;
   state.mask = 0;
+  state.maskBefore = 0;
+  state.maskLag = 0;
   state.t = 0;
   state.x = 0;
   state.w = false;
@@ -126,6 +149,11 @@ void ppuWrite(PpuState& state, std::uint8_t port, std::uint8_t value, const PpuI
       return;
     case 1:
       if (held) return;
+      // NESdev wiki, "PPU registers", PPUMASK, Rendering control: the frame counter keeps
+      // reading the rendering bits it was reading until the write's third dot.
+      state.maskBefore = state.maskLag != 0 ? state.maskBefore
+                                            : static_cast<std::uint8_t>(state.mask & 0x18u);
+      state.maskLag = kMaskLagDots;
       state.mask = value;
       return;
     case 2:
@@ -202,9 +230,10 @@ std::uint8_t ppuRead(PpuState& state, std::uint8_t port, const PpuInputs& inputs
     }
     case 4:
       // NESdev wiki, "PPU registers", OAMDATA: a read answers the byte at the OAM
-      // address and does not step it; "Open bus behavior", PPU open bus: the byte is
-      // driven onto the I/O bus.
-      driveBus(state, state.oam[state.oamAddr], 0xFF, inputs);
+      // address and does not step it; "PPU OAM", Byte 2 - Attributes: a sprite's byte 2
+      // answers five bits; "Open bus behavior", PPU open bus: the byte answered is driven
+      // onto the I/O bus whole.
+      driveBus(state, oamByte(state, state.oamAddr), 0xFF, inputs);
       return state.ioLatch;
     case 7: {
       const auto address = static_cast<std::uint16_t>(state.v & kAddressMask);
@@ -240,7 +269,7 @@ std::uint8_t ppuPeekRegister(const PpuState& state, std::uint8_t port) noexcept 
     case 2:
       return static_cast<std::uint8_t>((state.vblank ? 0x80u : 0u) | (state.ioLatch & 0x1Fu));
     case 4:
-      return state.oam[state.oamAddr];
+      return oamByte(state, state.oamAddr);
     case 7: {
       const auto address = static_cast<std::uint16_t>(state.v & kAddressMask);
       if (address >= kPaletteBase) {
@@ -254,9 +283,12 @@ std::uint8_t ppuPeekRegister(const PpuState& state, std::uint8_t port) noexcept 
 }
 
 bool ppuTickDot(PpuState& state, bool statusRead) noexcept {
+  // A write to $2001 comes a dot closer to the frame counter; the dot that takes the
+  // count to zero reads the write.
+  if (state.maskLag != 0) --state.maskLag;
   bool ended = false;
   if (state.scanline == kPreRenderScanline && state.dot == kSkippedFromDot && state.odd &&
-      renderingEnabled(state)) {
+      renderingAtTheCounter(state)) {
     // NESdev wiki, "PPU frame timing", Even/Odd Frames: an odd frame with rendering
     // enabled goes from dot 339 of scanline 261 straight to dot 0 of scanline 0.
     state.dot = 0;

@@ -1074,14 +1074,16 @@ for (int n = 0; n < 3; ++n) {
 The machine runs the CPU's self-checking test programs, blargg's eight suites as the
 `christopherpow/nes-test-roms` repository collects them: `instr_test-v5`, `instr_timing`,
 `instr_misc`, `cpu_dummy_reads`, `cpu_dummy_writes`, `cpu_exec_space`, `cpu_reset` and
-`branch_timing_tests`, 36 ROM files, and the APU's programs, which
-[the APU page](apu.md#testing-against-the-programs) names with their results. Each is booted
-on a machine built with the config's defaults and run one frame at a time until it reports.
-The newer programs report a status byte at `$6000` with a signature at `$6001-$6003` and
-their text from `$6004`, read out of `state().prgRam`; the older ones, `cpu_dummy_reads`,
-`branch_timing_tests`, the 2005 APU set and the DMC DMA programs, print their result on the
-screen, read out of `state().ppu.ciram`, the 2005 set as a result code, `$01` a pass. A
-program that asks for the reset button gets the reset line seven frames later.
+`branch_timing_tests`, 36 ROM files, and the APU's and the PPU's programs, which
+[the APU page](apu.md#testing-against-the-programs) and
+[the PPU page](ppu.md#testing-against-the-programs) name with their results. Each is booted on
+a machine built with the config's defaults, or with the field its page names, and run one frame
+at a time until it reports. The newer programs report a status byte at `$6000` with a signature
+at `$6001-$6003` and their text from `$6004`, read out of `state().prgRam`; the older ones,
+`cpu_dummy_reads`, `branch_timing_tests`, the 2005 APU set, the DMC DMA programs,
+`vbl_nmi_timing` and the 2005 PPU tests, print their result on the screen, read out of
+`state().ppu.ciram`, the two 2005 sets as a result code, `$01` a pass. A program that asks for
+the reset button gets the reset line seven frames later.
 
 Of the CPU's 36, 32 pass and four, the multi-test builds on mapper 1 whose sub-tests run from the
 singles, register and skip naming the mapper. `cpu_dummy_reads` names mapper 3 with one bank and
@@ -1110,6 +1112,8 @@ The hand-derived suites, by executable:
   values.
 - `ppu_registers_test` — the ports, the scroll file, `$2007`, the palette, OAM, the warm-up, the
   frame, the NMI, the `$2002` race by alignment, and the bus decay.
+- `ppu_programs_test` — a sprite's byte 2 through `$2004` and the dot a `$2001` write reaches
+  the odd frame's skip on, beside the PPU's programs.
 - `nes_input_dma_test` — the buttons, the strobe, the pads read bit by bit, the clock line, open
   bus, and OAM DMA at 513 and 514 cycles.
 - `nes_observers_test` — every access told with its kind, byte and source, the save report per

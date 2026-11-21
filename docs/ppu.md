@@ -39,6 +39,7 @@ The status table in the [README](../README.md) is the component's status row.
 - [Power-on, reset and the warm-up](#power-on-reset-and-the-warm-up)
   - [The reset line](#the-reset-line)
 - [Reading a register without its effect](#reading-a-register-without-its-effect)
+- [Testing against the programs](#testing-against-the-programs)
 - [Gotchas](#gotchas)
 - [What remains open](#what-remains-open)
 - [See also](#see-also)
@@ -55,12 +56,13 @@ the reset line, and `ppuNmiAsserted` for the NMI output. The machine calls them 
 and a host that runs the machine never needs to.
 
 ```cpp
-// The chip after the reset line: $2000, $2001, the temporary address, the fine X
-// scroll, the write toggle and the read buffer cleared, the counter at dot 0 of
-// scanline 0 of an even frame, and the warm-up window open; the vertical-blank flag,
-// the OAM address, the current address, the I/O bus with its decay and every memory
-// keep what they hold (NESdev wiki, "PPU power up state", Initial Register Values, the
-// After Reset column and the note on the internal reset signal).
+// The chip after the reset line: $2000, $2001 with any write of it still short of the
+// frame counter, the temporary address, the fine X scroll, the write toggle and the read
+// buffer cleared, the counter at dot 0 of scanline 0 of an even frame, and the warm-up
+// window open; the vertical-blank flag, the OAM address, the current address, the I/O bus
+// with its decay and every memory keep what they hold (NESdev wiki, "PPU power up state",
+// Initial Register Values, the After Reset column and the note on the internal reset
+// signal).
 void ppuReset(PpuState& state) noexcept;
 
 // A CPU write to port `port`, 0-7, the address's low three bits. Every write loads the
@@ -72,9 +74,10 @@ void ppuWrite(PpuState& state, std::uint8_t port, std::uint8_t value, const PpuI
 
 // A CPU read of port `port`. $2002 answers the vertical-blank flag in bit 7 over the
 // I/O bus's low five bits, then clears the flag and the write toggle; $2004 answers
-// the OAM byte at the OAM address; $2007 answers the read buffer and refills it from
-// the chip's address space at `v`, or answers a palette entry at once under the bus's
-// top two bits, and steps `v`; every other port answers the I/O bus as it stands.
+// the OAM byte at the OAM address, a sprite's byte 2 with bits 4-2 clear; $2007 answers
+// the read buffer and refills it from the chip's address space at `v`, or answers a
+// palette entry at once under the bus's top two bits, and steps `v`; every other port
+// answers the I/O bus as it stands.
 [[nodiscard]] std::uint8_t ppuRead(PpuState& state, std::uint8_t port, const PpuInputs& inputs);
 
 // What a read of port `port` would answer, with nothing moved: the flag, the toggle,
@@ -84,10 +87,11 @@ void ppuWrite(PpuState& state, std::uint8_t port, std::uint8_t value, const PpuI
 // One dot: steps the frame counter, sets the vertical-blank flag at dot 1 of scanline
 // 241 unless a read of $2002 is under way on the CPU's bus, clears the flag and closes
 // the warm-up window at dot 1 of scanline 261, goes from dot 339 of scanline 261
-// straight to dot 0 of scanline 0 on an odd frame with rendering enabled, counts each
-// bit of the I/O bus a dot closer to its decay, and answers whether this dot ended a
-// frame (NESdev wiki, "NMI", Operation; "PPU frame timing", Even/Odd Frames and VBL
-// Flag Timing; "PPU power up state").
+// straight to dot 0 of scanline 0 on an odd frame with rendering enabled, a write to
+// $2001 counting for that from the third dot after its access, counts each bit of the
+// I/O bus a dot closer to its decay, and answers whether this dot ended a frame (NESdev
+// wiki, "NMI", Operation; "PPU frame timing", Even/Odd Frames and VBL Flag Timing; "PPU
+// power up state"; "PPU registers", PPUMASK, Rendering control).
 bool ppuTickDot(PpuState& state, bool statusRead) noexcept;
 
 // The chip's NMI output, true while it is pulled low: the vertical-blank flag set and
@@ -158,6 +162,14 @@ struct PpuState {
   // odd-frame skip alone, and bit 0 is greyscale, which a palette read applies (NESdev
   // wiki, "PPU registers", PPUMASK). Bits 7-5 and 2-1 are held for the picture.
   std::uint8_t mask = 0;
+  // A write to $2001 reaches the frame counter on the third dot after its access.
+  // `maskLag` counts the dots still to pass, and while it is not zero the odd-frame skip
+  // reads `maskBefore`, the two rendering bits as they stood before the write (NESdev
+  // wiki, "PPU registers", PPUMASK, Rendering control: toggling rendering takes effect
+  // approximately 3-4 dots after the write; blargg's ppu_vbl_nmi, 10-even_odd_timing,
+  // whose four results place the dot).
+  std::uint8_t maskBefore = 0;
+  std::uint8_t maskLag = 0;
   // The vertical-blank flag, bit 7 of $2002: set at dot 1 of scanline 241, cleared at
   // dot 1 of scanline 261 and by a read of $2002 (NESdev wiki, "NMI", Operation). At
   // power-on it is what the config says.
@@ -212,8 +224,11 @@ struct PpuState {
   // $3F04, $3F08 and $3F0C (NESdev wiki, "PPU palettes", Palette RAM; "PPU memory
   // map").
   std::array<std::uint8_t, 32> palette{};
-  // The 256 bytes of object attribute memory, reached through $2003 and $2004 (NESdev
-  // wiki, "PPU memory map", OAM).
+  // The 256 bytes of object attribute memory, four to a sprite, reached through $2003
+  // and $2004 (NESdev wiki, "PPU memory map", OAM). A sprite's byte 2 is five bits in
+  // the chip, 7-5 and 1-0: the array keeps the byte as written, and a read of $2004
+  // answers those five with bits 4-2 clear (NESdev wiki, "PPU OAM", Byte 2 -
+  // Attributes).
   std::array<std::uint8_t, 256> oam{};
   [[nodiscard]] bool operator==(const PpuState&) const noexcept = default;
 };
@@ -227,7 +242,8 @@ inline constexpr std::uint16_t kDotsPerScanline = 341;
 inline constexpr std::uint16_t kScanlinesPerFrame = 262;
 ```
 
-`ctrl` and `mask` are `$2000` and `$2001` as last written; `v`, `t`, `x` and `w` are the scroll
+`ctrl` and `mask` are `$2000` and `$2001` as last written, and `maskBefore` and `maskLag` carry a
+`$2001` write to the frame counter; `v`, `t`, `x` and `w` are the scroll
 file the "PPU scrolling" page names; the I/O bus and its eight decay counts, the warm-up window,
 the counter's dot, scanline and parity, and the three memories are the rest. Every field is
 plain, so a snapshot taken between two ports' accesses restores to the same place.
@@ -240,17 +256,17 @@ bits. Every write loads the I/O bus whole, and every read of a write-only port a
 | Port | A write | A read answers | The read's side effects |
 |---|---|---|---|
 | `$2000` | `ctrl`, and bits 1–0 into bits 11–10 of `t`; ignored in the warm-up | the bus | none |
-| `$2001` | `mask`; ignored in the warm-up | the bus | none |
+| `$2001` | `mask`, which the frame counter reads from the write's third dot; ignored in the warm-up | the bus | none |
 | `$2002` | the bus and nothing more | the vertical-blank flag in bit 7 over the bus's low five bits | the flag and the toggle cleared; bits 7–5 of the bus driven |
 | `$2003` | the OAM address | the bus | none |
-| `$2004` | the OAM byte at the address, which then steps | the OAM byte at the address | the bus driven whole; the address unmoved |
+| `$2004` | the OAM byte at the address, which then steps | the OAM byte at the address, a sprite's byte 2 with bits 4–2 clear | the bus driven whole; the address unmoved |
 | `$2005` | the first write coarse X into `t` and fine X into `x`, the second fine Y and coarse Y into `t`; the toggle flips; ignored in the warm-up | the bus | none |
 | `$2006` | the first write bits 13–8 of `t` with bit 14 cleared, the second its low byte and then the whole of `t` into `v`; the toggle flips; ignored in the warm-up | the bus | none |
 | `$2007` | the byte through the chip's address space at `v`, then `v` steps by 1 or 32 | the read buffer, or a palette entry at once under the bus's top two bits | the buffer refilled from `v`; the bus driven; `v` steps |
 
 (NESdev wiki, "PPU registers", MMIO registers, PPUCTRL, PPUMASK, PPUSTATUS, OAMADDR, OAMDATA,
-PPUSCROLL, PPUADDR, PPUDATA; "PPU scrolling", Register controls; "Open bus behavior", PPU open
-bus.)
+PPUSCROLL, PPUADDR, PPUDATA; "PPU scrolling", Register controls; "PPU OAM", Byte 2 - Attributes;
+"Open bus behavior", PPU open bus.)
 
 ### A bare chip
 
@@ -328,6 +344,20 @@ neasant::ppuWrite(chip, 4, 0xBB, inputs);
 neasant::ppuWrite(chip, 3, 0x10, inputs);
 const std::uint8_t first = neasant::ppuRead(chip, 4, inputs);
 // first == 0xAA, and chip.oamAddr is still 0x10: a read does not
+```
+
+A sprite's byte 2, its attributes, is five bits in the chip: bits 7–5 and 1–0. `oam` keeps the
+byte as written, and a read of `$2004` answers the five with bits 4–2 clear and drives the I/O bus
+with what it answered (NESdev wiki, "PPU OAM", Byte 2 - Attributes).
+
+```cpp
+neasant::ppuWrite(chip, 3, 0x12, inputs);  // sprite 4's byte 2
+neasant::ppuWrite(chip, 4, 0xFF, inputs);
+neasant::ppuWrite(chip, 3, 0x12, inputs);
+const std::uint8_t attributes = neasant::ppuRead(chip, 4, inputs);
+// attributes == 0xE3: bits 4-2 read back as 0
+// chip.oam[0x12] == 0xFF: the array keeps the byte as written
+// chip.ioLatch == 0xE3: the read drives the bus with what it answered
 ```
 
 ### $2005 and $2006
@@ -505,6 +535,33 @@ while (!neasant::ppuTickDot(rendering, false)) ++odd;
 // odd + 1 == 89341: the odd frame leaves scanline 261 from dot 339
 ```
 
+A write to `$2001` reaches the skip on the third dot after its access. Until then the counter
+reads the rendering bits as they stood before the write, which `maskBefore` holds while `maskLag`
+counts the dots. A write that enables the background while the counter stands at dot 337 of an
+odd frame's scanline 261 is read at dot 339 and the dot is skipped; the same write one dot later
+leaves the frame whole (NESdev wiki, "PPU registers", PPUMASK, Rendering control; blargg's
+`ppu_vbl_nmi`, `10-even_odd_timing`).
+
+```cpp
+std::vector<std::uint8_t> image = programImage({});
+neasant::Cartridge cartridge = neasant::makeCartridge(image);
+neasant::Board board = neasant::boardFor(cartridge);
+std::vector<std::uint8_t> chrRam(cartridge.chrRamBytes);
+const neasant::PpuInputs inputs{board, cartridge, chrRam, 115200u};
+
+neasant::PpuState late;
+late.warmingUp = false;
+late.odd = true;
+late.scanline = 261;
+late.dot = 337;
+neasant::ppuWrite(late, 1, 0x08, inputs);  // the background enabled at dot 337
+// late.maskLag == 3 and late.maskBefore == 0x00: the counter reads the bits before the write
+neasant::ppuTickDot(late, false);  // dot 338
+neasant::ppuTickDot(late, false);  // dot 339
+const bool skipped = neasant::ppuTickDot(late, false);  // the third dot reads the write
+// skipped == true, late.scanline == 0 and late.dot == 0: the frame ended a dot short
+```
+
 ### The machine's frame
 
 The machine runs the dots from a dot clock the alignment seeds, four master cycles a dot. Counting
@@ -608,6 +665,7 @@ registers", the opening paragraph).
 | Field | At power-on | After the reset line |
 |---|---|---|
 | `ctrl`, `mask` | 0 | 0 |
+| `maskBefore`, `maskLag` | 0, 0 | 0, 0 |
 | `vblank` | `vblankAtPowerOn` | kept |
 | `oamAddr` | 0 | kept |
 | `v` | 0 | kept |
@@ -686,6 +744,26 @@ peeked.readBuffer = 0x33;
 // neasant::ppuPeekRegister(peeked, 0) == 0x1A: a write-only port answers the bus
 ```
 
+## Testing against the programs
+
+The register file's self-checking test programs run on [the machine](nes-machine.md), each
+booted on a machine built from a config value and run a frame at a time until it reports, as
+[the machine page](nes-machine.md#testing-against-the-programs) describes: blargg's
+`ppu_vbl_nmi`, `vbl_nmi_timing`, `blargg_ppu_tests_2005.09.15b`, `ppu_open_bus`, `oam_read` and
+`oam_stress`, and Bisqwit's and blargg's `ppu_read_buffer`, as the
+`christopherpow/nes-test-roms` repository collects them, 27 ROM files.
+
+Of the 27, 25 pass. `ppu_vbl_nmi.nes`, the multi-test build on mapper 1, skips naming the
+mapper, and `test_ppu_read_buffer.nes`, on mapper 3 with four banks of CHR, skips naming its
+mapper. `ppu_vbl_nmi` and `vbl_nmi_timing` time the flag, the NMI and the odd frame's skipped
+dot to one PPU clock, and their readmes say the console fails some of them after some resets;
+they pass under alignment 0, the config's default. `02-vbl_set_time` is also run under
+alignments 1 to 3, where it prints the row its readme gives for those resets.
+`power_up_palette` compares the palette at power-on with its author's console's, so its
+machine is built with that table as `NesConfig::ramSeed`. `vbl_nmi_timing` prints `PASSED` or
+`FAILED` on the screen and the 2005 tests a result code, `$01` a pass; the others report at
+`$6000`.
+
 ## Gotchas
 
 - **Four ports ignore writes until the first pre-render line.** `$2000`, `$2001`, `$2005` and
@@ -700,6 +778,8 @@ peeked.readBuffer = 0x33;
 - **The I/O bus decays.** A value left on it is gone after the configured count; a read of a
   write-only port recharges nothing.
 - **`$2004` writes step the address and reads do not.**
+- **A sprite's byte 2 reads back five bits.** `$2004` answers bits 4–2 clear; `oam` keeps the
+  byte as written.
 - **The vertical-blank flag is set at power-on by default.** `vblankAtPowerOn` clears it; a
   program that waits for the flag to clear first is waiting on this field.
 - **A read of `$2002` on the dot before the set reads 0 and loses the frame's flag.** The NMI is
@@ -707,6 +787,8 @@ peeked.readBuffer = 0x33;
 - **`$3F10` is `$3F00`.** The four sprite palettes' entry 0 are the background palettes'.
 - **Greyscale changes what a palette read answers, not what it holds.**
 - **Rendering enabled changes one thing here.** The odd frame's skipped dot; no tile is fetched.
+- **A `$2001` write reaches the frame counter on its third dot.** A write that enables the
+  background within two dots of an odd frame's dot 339 leaves that frame whole.
 - **`v` steps linearly through `$2007`.** By 1 or 32, wrapping inside 15 bits; its top bit
   reaches no address.
 - **The reset line keeps the flag, the OAM address, `v`, the bus and the memories.**
@@ -717,12 +799,17 @@ What the code does at each point below is fixed and tested; what the hardware do
 by the documents the chip is built from.
 
 1. **The flag against a read under alignments 1 to 3.** The race's outcomes under alignment 0 are
-   the "PPU frame timing" page's. The other alignments' columns follow from the page's statement
-   that a CPU tick begins 0 to 3 master cycles before the nearest PPU tick and from the "CPU
-   pinout" page's M2 duty cycle, and are derived, not measured.
+   the "PPU frame timing" page's, and blargg's `ppu_vbl_nmi` and `vbl_nmi_timing`, which time the
+   flag to one PPU clock, pass under it. Under the other alignments a read loses the flag on two
+   dots where alignment 0 loses it on one, the outcome `02-vbl_set_time`'s readme reports on the
+   console "after some resets". The other alignments' remaining columns follow from the page's
+   statement that a CPU tick begins 0 to 3 master cycles before the nearest PPU tick and from the
+   "CPU pinout" page's M2 duty cycle, and are derived, not measured.
 2. **How wide the NMI suppression is.** The "PPU registers" page has the NMI suppressed by reads
-   landing on the following dot or two; the "PPU frame timing" page has one dot; the chip follows
-   the frame-timing page.
+   landing on the following dot or two; the "PPU frame timing" page has the read on the set's dot
+   or one later. `06-suppression` and `5.nmi_suppression` measure the frame-timing page's two dots
+   on the console, and the chip gives them under alignment 0. Under alignments 1 to 3 the chip
+   suppresses on one dot, derived as item 1's columns are.
 3. **The chip while rendering.** The "PPU registers" page states behaviors the register file does
    not carry: a rendering toggle reaching the picture three or four dots after the write, the
    second `$2006` write reaching `v` one to one and a half dots on (loaded at the write here), the
@@ -730,8 +817,12 @@ by the documents the chip is built from.
    exposed through `$2004`, the `$2000` bit 0 race at dot 257, the `$2006` bus conflict, and the
    palette corruption; the "DMA" page adds the DPCM read conflict with `$2007`. Each is stated by
    its page and belongs to the picture or the DMC.
-4. **The 2C02G's OAM corruption on `$2003` writes, and OAM byte 2's unimplemented bits.** The
-   "PPU registers" page's OAMADDR note; the chip holds every byte written.
+4. **The 2C02G's OAM corruption on `$2003` writes.** The "PPU registers" page's OAMADDR note and
+   the "Errata" page's sprite entries have a write to `$2003` copy one eight-byte row of OAM over
+   another on some CPU-PPU alignments, without stating which bytes on which alignment;
+   `oam_stress`'s readme has the console passing "only for one of the four random PPU-CPU
+   synchronizations", and `oam_read`'s shows four patterns. A `$2003` write on this chip sets the
+   address and leaves OAM as it is, and both programs pass.
 5. **Whether a palette write drives the PPU bus.** No document the chip is built from states that
    the chip drives `/WR` for a write to `$3F00-$3FFF`; the chip presents a palette access to no
    board.
@@ -748,8 +839,15 @@ by the documents the chip is built from.
 9. **The palette read's revision.** The "PPU registers" page's immediate palette read is the
    2C02G's and later; earlier revisions answered the read buffer. The chip is the 2C02G's and the
    earlier answer is not selectable.
-10. **OAM's reads.** The CPU's `cpu_dummy_writes_oam` program passes on this chip's OAM, which
-    reads back every byte; its readme says the console's does not.
+10. **OAM's reads.** The `cpu_dummy_writes_oam` program needs reliable OAM reads, which its text
+    says is "often the case on emulators, but NOT on the real NES"; the "PPU registers" page puts
+    the console's unreliable reads down to the corruption by `$2003` writes, item 4's. The chip's
+    `$2004` answers every byte it holds, a sprite's byte 2 as five bits.
+11. **The dot a `$2001` write reaches the frame counter on.** `10-even_odd_timing` places it to
+    one PPU clock and passes on this chip under alignment 0 with the third dot after the access;
+    the "PPU registers" page gives approximately 3-4 dots after the write. The count is the same
+    under the other alignments, which the program is not run under, and whether the picture's
+    readers of the rendering bits lag by it belongs to item 3.
 
 ## See also
 
@@ -763,13 +861,21 @@ by the documents the chip is built from.
 - `include/neasant/ppu/ppu.h` — the state value, the inputs, the six functions.
 - `src/ppu/ppu.cpp` — every port's write and read, the palette and CIRAM, the dot counter with its
   flag, warm-up and skip, and the bus's decay.
-- `tests/ppu/registers_test.cpp` — the suite.
+- `tests/ppu/registers_test.cpp` — the hand-derived suite.
+- `tests/ppu/programs_test.cpp` — the register file's test programs, a sprite's byte 2 and the
+  dot a `$2001` write reaches the skip on.
 
 ## Sources
 
 - **NESdev wiki** — the pages "PPU registers", "PPU scrolling", "PPU memory map", "PPU palettes",
-  "PPU frame timing", "PPU power up state", "NMI", "Open bus behavior", "Cartridge connector",
-  "CPU pinout", "CPU interrupts" and "DMA", at `https://www.nesdev.org/wiki/`.
+  "PPU OAM", "PPU frame timing", "PPU power up state", "NMI", "Open bus behavior", "Cartridge
+  connector", "CPU pinout", "CPU interrupts", "DMA" and "Errata", at
+  `https://www.nesdev.org/wiki/`.
+- **The test programs** — blargg's `ppu_vbl_nmi`, `vbl_nmi_timing`,
+  `blargg_ppu_tests_2005.09.15b`, `ppu_open_bus`, `oam_read` and `oam_stress`, with their readmes
+  and sources, as the `christopherpow/nes-test-roms` repository at
+  `https://github.com/christopherpow/nes-test-roms` collects them. The tables `ppu_vbl_nmi`'s
+  readme prints for each program are published measurements of the console.
 - **The `ppudecay` test program** — lidnariq's, public domain (2023), with its source and its
   author's description of what it measures and what it reports on his console, published at
   `https://forums.nesdev.org/viewtopic.php?t=24639`.

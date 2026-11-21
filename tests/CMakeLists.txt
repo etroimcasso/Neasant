@@ -176,3 +176,14 @@ target_include_directories(apu_filter_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/n
 neasant_add_test(render_test tools/render_test.cpp)
 target_link_libraries(render_test PRIVATE neasant_render)
 target_include_directories(render_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
+
+# The PPU's register file on its test programs: the vertical-blank flag and the NMI to one
+# PPU clock, the odd frame's skipped dot against a write to $2001, palette RAM, the read
+# buffer, the I/O bus bit by bit, and OAM through $2003, $2004 and $4014, each program
+# booted on the machine and read out of the state value; and beside them a sprite's byte 2
+# read back as five bits and the dot a $2001 write reaches the skip on, as hand cases. The
+# harness and the authored-image helpers are the machine tests'.
+neasant_add_test(ppu_programs_test ppu/programs_test.cpp nes/rom_harness.cpp)
+target_include_directories(ppu_programs_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
+target_compile_definitions(ppu_programs_test PRIVATE
+  NEASANT_NES_TEST_ROMS="${NEASANT_NES_TEST_ROMS}")

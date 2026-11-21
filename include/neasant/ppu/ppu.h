@@ -35,6 +35,14 @@ struct PpuState {
   // odd-frame skip alone, and bit 0 is greyscale, which a palette read applies (NESdev
   // wiki, "PPU registers", PPUMASK). Bits 7-5 and 2-1 are held for the picture.
   std::uint8_t mask = 0;
+  // A write to $2001 reaches the frame counter on the third dot after its access.
+  // `maskLag` counts the dots still to pass, and while it is not zero the odd-frame skip
+  // reads `maskBefore`, the two rendering bits as they stood before the write (NESdev
+  // wiki, "PPU registers", PPUMASK, Rendering control: toggling rendering takes effect
+  // approximately 3-4 dots after the write; blargg's ppu_vbl_nmi, 10-even_odd_timing,
+  // whose four results place the dot).
+  std::uint8_t maskBefore = 0;
+  std::uint8_t maskLag = 0;
   // The vertical-blank flag, bit 7 of $2002: set at dot 1 of scanline 241, cleared at
   // dot 1 of scanline 261 and by a read of $2002 (NESdev wiki, "NMI", Operation). At
   // power-on it is what the config says.
@@ -89,8 +97,11 @@ struct PpuState {
   // $3F04, $3F08 and $3F0C (NESdev wiki, "PPU palettes", Palette RAM; "PPU memory
   // map").
   std::array<std::uint8_t, 32> palette{};
-  // The 256 bytes of object attribute memory, reached through $2003 and $2004 (NESdev
-  // wiki, "PPU memory map", OAM).
+  // The 256 bytes of object attribute memory, four to a sprite, reached through $2003
+  // and $2004 (NESdev wiki, "PPU memory map", OAM). A sprite's byte 2 is five bits in
+  // the chip, 7-5 and 1-0: the array keeps the byte as written, and a read of $2004
+  // answers those five with bits 4-2 clear (NESdev wiki, "PPU OAM", Byte 2 -
+  // Attributes).
   std::array<std::uint8_t, 256> oam{};
   [[nodiscard]] bool operator==(const PpuState&) const noexcept = default;
 };
@@ -106,12 +117,13 @@ struct PpuInputs {
   std::uint32_t busDecayDots;
 };
 
-// The chip after the reset line: $2000, $2001, the temporary address, the fine X
-// scroll, the write toggle and the read buffer cleared, the counter at dot 0 of
-// scanline 0 of an even frame, and the warm-up window open; the vertical-blank flag,
-// the OAM address, the current address, the I/O bus with its decay and every memory
-// keep what they hold (NESdev wiki, "PPU power up state", Initial Register Values, the
-// After Reset column and the note on the internal reset signal).
+// The chip after the reset line: $2000, $2001 with any write of it still short of the
+// frame counter, the temporary address, the fine X scroll, the write toggle and the read
+// buffer cleared, the counter at dot 0 of scanline 0 of an even frame, and the warm-up
+// window open; the vertical-blank flag, the OAM address, the current address, the I/O bus
+// with its decay and every memory keep what they hold (NESdev wiki, "PPU power up state",
+// Initial Register Values, the After Reset column and the note on the internal reset
+// signal).
 void ppuReset(PpuState& state) noexcept;
 
 // A CPU write to port `port`, 0-7, the address's low three bits. Every write loads the
@@ -123,9 +135,10 @@ void ppuWrite(PpuState& state, std::uint8_t port, std::uint8_t value, const PpuI
 
 // A CPU read of port `port`. $2002 answers the vertical-blank flag in bit 7 over the
 // I/O bus's low five bits, then clears the flag and the write toggle; $2004 answers
-// the OAM byte at the OAM address; $2007 answers the read buffer and refills it from
-// the chip's address space at `v`, or answers a palette entry at once under the bus's
-// top two bits, and steps `v`; every other port answers the I/O bus as it stands.
+// the OAM byte at the OAM address, a sprite's byte 2 with bits 4-2 clear; $2007 answers
+// the read buffer and refills it from the chip's address space at `v`, or answers a
+// palette entry at once under the bus's top two bits, and steps `v`; every other port
+// answers the I/O bus as it stands.
 [[nodiscard]] std::uint8_t ppuRead(PpuState& state, std::uint8_t port, const PpuInputs& inputs);
 
 // What a read of port `port` would answer, with nothing moved: the flag, the toggle,
@@ -135,10 +148,11 @@ void ppuWrite(PpuState& state, std::uint8_t port, std::uint8_t value, const PpuI
 // One dot: steps the frame counter, sets the vertical-blank flag at dot 1 of scanline
 // 241 unless a read of $2002 is under way on the CPU's bus, clears the flag and closes
 // the warm-up window at dot 1 of scanline 261, goes from dot 339 of scanline 261
-// straight to dot 0 of scanline 0 on an odd frame with rendering enabled, counts each
-// bit of the I/O bus a dot closer to its decay, and answers whether this dot ended a
-// frame (NESdev wiki, "NMI", Operation; "PPU frame timing", Even/Odd Frames and VBL
-// Flag Timing; "PPU power up state").
+// straight to dot 0 of scanline 0 on an odd frame with rendering enabled, a write to
+// $2001 counting for that from the third dot after its access, counts each bit of the
+// I/O bus a dot closer to its decay, and answers whether this dot ended a frame (NESdev
+// wiki, "NMI", Operation; "PPU frame timing", Even/Odd Frames and VBL Flag Timing; "PPU
+// power up state"; "PPU registers", PPUMASK, Rendering control).
 bool ppuTickDot(PpuState& state, bool statusRead) noexcept;
 
 // The chip's NMI output, true while it is pulled low: the vertical-blank flag set and
