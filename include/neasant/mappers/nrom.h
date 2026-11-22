@@ -26,7 +26,8 @@ bool cpuCycle(Nrom&, const Cartridge& cartridge, CpuPins& pins, std::span<std::u
 // The PPU's access on the pins. Drives the CIRAM lines on every presentation — enabled
 // for $2000-$3FFF, A10 from PPU A11 under horizontal mirroring and PPU A10 under vertical —
 // and answers the pattern tables, $0000-$1FFF, from the CHR ROM or RAM: true for those
-// addresses, false above them.
+// addresses, false above them. A presentation with neither strobe low, an address alone,
+// moves the CIRAM lines and reads and writes nothing.
 bool ppuAccess(Nrom&, const Cartridge& cartridge, PpuPins& pins, std::span<std::uint8_t> chrRam);
 
 // The mirroring the board is wired for.

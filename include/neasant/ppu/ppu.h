@@ -6,11 +6,12 @@
 // the port at $2007 over the chip's own 14-bit address space; the frame counter that
 // runs 341 dots by 262 scanlines; the vertical-blank flag and the NMI output it drives;
 // the warm-up window after power-on and reset; the memories the console and the chip
-// hold, nametable RAM, palette RAM and object attribute memory; and the picture, 256
-// dots by 240 lines, each resolved on its dot with rendering disabled: the backdrop, or
-// the palette entry `v` points at, under greyscale and emphasis. No tile is fetched and
-// no sprite is evaluated: with rendering enabled every dot of the picture is the
-// backdrop, and the frame counter skips its odd-frame dot.
+// hold, nametable RAM, palette RAM and object attribute memory; the background, each
+// tile fetched through the board in four accesses of two dots, shifted out a pixel a
+// dot and scrolled by `v`; and the picture, 256 dots by 240 lines, each resolved on its
+// dot: with rendering enabled the background's pixel, or the backdrop where that is
+// transparent, and with rendering disabled the backdrop or the palette entry `v` points
+// at, under greyscale and emphasis. No sprite is evaluated or drawn.
 
 #include "neasant/nes/board.h"
 #include "neasant/nes/cartridge.h"
@@ -29,23 +30,28 @@ inline constexpr std::uint16_t kScanlinesPerFrame = 262;
 
 // The chip's whole mutable state as a value: snapshot by copy, restore by assignment.
 struct PpuState {
-  // $2000 as last written: bit 7 enables the NMI output, bit 2 selects the step the
-  // address takes after a $2007 access, 1 or 32, and bits 1-0 are copied into the
-  // temporary address as the nametable select (NESdev wiki, "PPU registers", PPUCTRL;
-  // "PPU scrolling", $2000 write). Bits 6-3 are held for the picture.
+  // $2000 as last written: bit 7 enables the NMI output, bit 4 selects the half of the
+  // pattern table the background's tiles are read from, $0000 or $1000, bit 2 selects
+  // the step the address takes after a $2007 access, 1 or 32, and bits 1-0 are copied
+  // into the temporary address as the nametable select (NESdev wiki, "PPU registers",
+  // PPUCTRL; "PPU pattern tables", Addressing; "PPU scrolling", $2000 write). Bits 6, 5
+  // and 3 are held for the sprites and the EXT pins.
   std::uint8_t ctrl = 0;
-  // $2001 as last written: bits 4 and 3 enable rendering, which here decides the
-  // odd-frame skip and whether `v` names the picture's entry; bit 0 is greyscale, which
-  // a palette read and the picture apply; and bits 7-5 are the emphasis bits every dot
-  // of the picture carries (NESdev wiki, "PPU registers", PPUMASK). Bits 2-1 are held
-  // for the background and the sprites.
+  // $2001 as last written: bits 4 and 3 enable rendering, which runs the fetches, the
+  // shift registers, `v`'s moves and the odd-frame skip, and decides whether a position
+  // of the picture is the background's or `v` names its entry; bit 3 shows the
+  // background, and bit 1 shows it in the picture's eight leftmost positions; bit 0 is
+  // greyscale, which a palette read and the picture apply; and bits 7-5 are the emphasis
+  // bits every dot of the picture carries (NESdev wiki, "PPU registers", PPUMASK). Bit 2
+  // is held for the sprites.
   std::uint8_t mask = 0;
   // A write to $2001 reaches the frame counter on the third dot after its access.
-  // `maskLag` counts the dots still to pass, and while it is not zero the odd-frame skip
-  // reads `maskBefore`, the two rendering bits as they stood before the write (NESdev
-  // wiki, "PPU registers", PPUMASK, Rendering control: toggling rendering takes effect
-  // approximately 3-4 dots after the write; blargg's ppu_vbl_nmi, 10-even_odd_timing,
-  // whose four results place the dot).
+  // `maskLag` counts the dots still to pass, and while it is not zero the odd-frame
+  // skip, the fetches, the shift registers and `v`'s moves read `maskBefore`, the two
+  // rendering bits as they stood before the write (NESdev wiki, "PPU registers",
+  // PPUMASK, Rendering control: toggling rendering takes effect approximately 3-4 dots
+  // after the write; blargg's ppu_vbl_nmi, 10-even_odd_timing, whose four results place
+  // the dot).
   std::uint8_t maskBefore = 0;
   std::uint8_t maskLag = 0;
   // The vertical-blank flag, bit 7 of $2002: set at dot 1 of scanline 241, cleared at
@@ -108,6 +114,46 @@ struct PpuState {
   // answers those five with bits 4-2 clear (NESdev wiki, "PPU OAM", Byte 2 -
   // Attributes).
   std::array<std::uint8_t, 256> oam{};
+  // What the chip keeps of the tile it is fetching, each from its read until the next
+  // read of its kind: the nametable byte, which names the tile; the two bits of the
+  // attribute byte that are the tile's palette, selected as the byte is read by bit 1
+  // of `v`'s coarse X and bit 1 of its coarse Y; and the tile's row of pixels as its two
+  // pattern bytes, [0] the byte of the pixels' low bits and [1] the byte of their high
+  // bits (NESdev wiki, "PPU rendering", Cycles 1-256; "PPU attribute tables"; "PPU
+  // pattern tables"; Brad Taylor's NTSC 2C02 technical reference, Playfield render
+  // pipeline details: the palette select data is selected from the fetched byte as it
+  // is latched).
+  std::uint8_t nametableLatch = 0;
+  std::uint8_t attributeLatch = 0;
+  std::array<std::uint8_t, 2> patternLatch{};
+  // The background's shift registers. `patternShift` is the two 16-bit registers, [0]
+  // for the pixels' low bits and [1] for their high bits: a reload puts a pattern byte
+  // in the high eight bits with the tile's leftmost pixel at bit 8, a shift moves every
+  // bit one place toward bit 0, and bit 15 then takes a 0 in [0] and a 1 in [1].
+  // `attributeShift` is the two 8-bit registers that carry a pixel's palette beside it,
+  // each taking at bit 7 its bit of `attributeFeed`, the two 1-bit latches a reload
+  // fills from `attributeLatch`. The fine X scroll picks the pixel: bit `x` of each
+  // register (NESdev wiki, "PPU rendering", Picture region and its notes).
+  std::array<std::uint16_t, 2> patternShift{};
+  std::array<std::uint8_t, 2> attributeShift{};
+  std::uint8_t attributeFeed = 0;
+  // The background's pixels on their way to the picture: [0] the one selected on the
+  // last dot and [1] the one selected on the dot before it. A pixel is a palette
+  // address: 0 when it is transparent, and otherwise the tile's palette in bits 3-2 over
+  // the pattern's two bits. A position's pixel is selected two dots behind the counter
+  // and reaches the picture four behind it (NESdev wiki, "PPU rendering", Cycles 1-256:
+  // the shifters first shift on cycle 2, where sprite 0 hit takes the image to start,
+  // and the first pixel is output during cycle 4).
+  std::array<std::uint8_t, 2> pixelPipeline{};
+  // The address lines as the fetch circuit last drove them, and the console's address
+  // latch. On the first dot of an access the chip drives all fourteen lines and the
+  // latch captures the low eight; on the second the low eight lines carry the data, the
+  // chip drives the high six, and the cartridge and the nametable RAM are addressed by
+  // those six over the latch. `addressPins` keeps its low eight bits as an address last
+  // put them (NESdev wiki, "PPU rendering", PPU address bus contents; "PPU pinout",
+  // Signal descriptions).
+  std::uint16_t addressPins = 0;
+  std::uint8_t addressLatch = 0;
   [[nodiscard]] bool operator==(const PpuState&) const noexcept = default;
 };
 
@@ -135,9 +181,10 @@ enum class PpuDotEvent : std::uint8_t { None, PictureBegun, VerticalBlank, Frame
 // frame counter, the temporary address, the fine X scroll, the write toggle and the read
 // buffer cleared, the counter at dot 0 of scanline 0 of an even frame, and the warm-up
 // window open; the vertical-blank flag, the OAM address, the current address, the I/O bus
-// with its decay and every memory keep what they hold (NESdev wiki, "PPU power up state",
-// Initial Register Values, the After Reset column and the note on the internal reset
-// signal).
+// with its decay, the fetch latches, the shift registers, the pixels on their way to the
+// picture, the address lines and every memory keep what they hold (NESdev wiki, "PPU
+// power up state", Initial Register Values, the After Reset column and the note on the
+// internal reset signal).
 void ppuReset(PpuState& state) noexcept;
 
 // A CPU write to port `port`, 0-7, the address's low three bits. Every write loads the
@@ -159,23 +206,40 @@ void ppuWrite(PpuState& state, std::uint8_t port, std::uint8_t value, const PpuI
 // the read buffer, the address and the I/O bus all stay as they are.
 [[nodiscard]] std::uint8_t ppuPeekRegister(const PpuState& state, std::uint8_t port) noexcept;
 
-// One dot: steps the frame counter, sets the vertical-blank flag at dot 1 of scanline
-// 241 unless a read of $2002 is under way on the CPU's bus, clears the flag and closes
-// the warm-up window at dot 1 of scanline 261, goes from dot 339 of scanline 261
-// straight to dot 0 of scanline 0 on an odd frame with rendering enabled, a write to
-// $2001 counting for that from the third dot after its access, resolves the picture's
-// position for the dot on dots 4-259 of scanlines 0-239 and stores it when `inputs`
-// carries the picture, counts each bit of the I/O bus a dot closer to its decay, and
-// answers what the dot was (PpuDotEvent). Position x of line y is resolved on dot x + 4
-// of scanline y, the chip's output running four dots behind its counter; with rendering
-// disabled its value is the backdrop, palette entry 0, or the entry the low 14 bits of
-// `v` name while they are in $3F00-$3FFF, and with rendering enabled the backdrop, each
-// under greyscale and the emphasis bits as $2001 stands on that dot (NESdev wiki, "NMI",
-// Operation; "PPU frame timing", Even/Odd Frames and VBL Flag Timing; "PPU power up
-// state"; "PPU registers", PPUMASK; "PPU rendering", Drawing overview, Rendering
-// disabled and Cycles 1-256, and its frame timing diagram's notes; "PPU palettes",
-// Backdrop override).
-PpuDotEvent ppuTickDot(PpuState& state, bool statusRead, const PpuInputs& inputs) noexcept;
+// One dot. Steps the frame counter, going from dot 339 of scanline 261 straight to dot
+// 0 of scanline 0 on an odd frame with rendering enabled; sets the vertical-blank flag
+// at dot 1 of scanline 241 unless a read of $2002 is under way on the CPU's bus, and
+// clears it and closes the warm-up window at dot 1 of scanline 261.
+//
+// With rendering enabled, on scanlines 0-239 and 261, runs the background's dot. An
+// access through the board is two dots, the address and then the read. Dots 1-256 and
+// 321-336 fetch a tile every eight: its nametable byte, its attribute byte and its two
+// pattern bytes. Each eight dots from 257 to 320 open with two nametable fetches, the
+// first kept and the second dropped, as dots 337-340 are; the four dots that follow
+// them in each eight make no access. Dot 0 of scanlines 0-240 drives the address of the
+// next pattern fetch and reads nothing, and the dot an odd frame reaches by its skip
+// makes the read dot 340 would have. The shift registers shift on dots 2-257 and
+// 322-337 and reload on every eighth dot from 9 to 257 and on dots 329 and 337. `v`
+// steps its coarse X on every eighth dot from 8 to 256 and on dots 328 and 336, steps
+// its Y on dot 256, takes `t`'s horizontal bits on dot 257 and, on scanline 261, `t`'s
+// vertical bits on each of dots 280-304. A write to $2001 counts for the skip and for
+// all of this from the third dot after its access.
+//
+// Resolves the picture's position for the dot on dots 4-259 of scanlines 0-239, and
+// stores it when `inputs` carries the picture: position x of line y on dot x + 4 of
+// scanline y. With rendering enabled its value is the background's pixel, selected two
+// dots earlier, or the backdrop, palette entry 0, where that pixel is transparent; with
+// rendering disabled the backdrop, or the entry the low 14 bits of `v` name while they
+// are in $3F00-$3FFF; each under greyscale and the emphasis bits as $2001 stands on that
+// dot. Counts each bit of the I/O bus a dot closer to its decay, and answers what the
+// dot was (PpuDotEvent).
+//
+// NESdev wiki, "NMI", Operation; "PPU frame timing", Even/Odd Frames and VBL Flag
+// Timing; "PPU power up state"; "PPU registers", PPUMASK; "PPU rendering", Drawing
+// overview, Rendering disabled, Line-by-line timing and PPU address bus contents, and its
+// frame timing diagram with its notes; "PPU scrolling", Register controls and Wrapping
+// around; "PPU palettes", Backdrop override.
+PpuDotEvent ppuTickDot(PpuState& state, bool statusRead, const PpuInputs& inputs);
 
 // The chip's NMI output, true while it is pulled low: the vertical-blank flag set and
 // $2000 bit 7 set (NESdev wiki, "NMI", Operation).

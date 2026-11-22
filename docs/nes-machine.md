@@ -9,16 +9,15 @@ machine cycle or a master-cycle budget at a time, holds the whole mutable machin
 state value, is told about the bus, the save and the picture through three observers it sets,
 and drains the sound as frames.
 
-The machine runs a program's code against the console's bus, its timing and its interrupts, and
-the CPU's, the APU's and the PPU's self-checking test programs pass on it
-([Testing against the programs](#testing-against-the-programs)). The PPU is its register file,
-its memories, its frame counter, its NMI output and its picture, each position the backdrop or
-the palette entry `v` points at with rendering disabled, no tile fetched
-([the PPU page](ppu.md#the-picture)). The APU is built whole:
-its frame counter, its five channels with the DMC fetching its samples through the DMA unit,
-both interrupts on the CPU's IRQ line, its mixer and the console's output filters, whose output
-is averaged down to the frames a host drains ([The APU](#the-apu)). PAL and Dendy are named by
-`Region` and refused at construction, so every machine is NTSC.
+The machine runs a program's code against the console's bus, its timing and its interrupts, and the
+CPU's, the APU's and the PPU's self-checking test programs pass on it ([Testing against the
+programs](#testing-against-the-programs)). The PPU is its register file, its memories, its frame
+counter, its NMI output, its background and its picture, the background drawn over the backdrop with
+rendering enabled and no sprite drawn ([the PPU page](ppu.md#the-picture)). The APU is built whole:
+its frame counter, its five channels with the DMC fetching its samples through the DMA unit, both
+interrupts on the CPU's IRQ line, its mixer and the console's output filters, whose output is
+averaged down to the frames a host drains ([The APU](#the-apu)). PAL and Dendy are named by `Region`
+and refused at construction, so every machine is NTSC.
 
 The status table in the [README](../README.md) is the component's status row. The CPU core the
 machine steps is on [the 6502 core's page](6502-cpu.md).

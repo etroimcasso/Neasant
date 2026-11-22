@@ -375,15 +375,19 @@ try {
 
 ## The pins
 
-The board sees the connector's pins and nothing else. On the CPU side it is presented once per
-CPU cycle with the address and R/W, stable for the whole period M2 is high, and the data as the
-bus carries it at M2's fall. On a write the console drives the data lines; on a read the board
-drives them when it decodes the address and leaves them alone when it does not. `/ROMSEL` is the
-console's NAND of M2 and A15, low for `$8000-$FFFF` while the address is stable. On the PPU side
-the board is presented once per PPU access with the 14-bit address, `/RD` or `/WR`, and the data
-lines. It drives the two CIRAM lines on every presentation, `CIRAM /CE` enabling the console's
-2 KB of nametable RAM and `CIRAM A10` selecting which kilobyte, and drives the data lines on a
-read it answers (NESdev wiki, "Cartridge connector", Signal descriptions).
+The board sees the connector's pins and nothing else. On the CPU side it is presented once per CPU
+cycle with the address and R/W, stable for the whole period M2 is high, and the data as the bus
+carries it at M2's fall. On a write the console drives the data lines; on a read the board drives
+them when it decodes the address and leaves them alone when it does not. `/ROMSEL` is the console's
+NAND of M2 and A15, low for `$8000-$FFFF` while the address is stable. On the PPU side the board is
+presented the 14-bit address, `/RD` and `/WR`, and the data lines, once for each dot the chip puts
+an address on its lines or holds a strobe low. A fetch the chip makes while it renders is two
+presentations, its address alone with neither strobe low and then its read ([the PPU
+page](ppu.md#a-tiles-four-accesses)); an access through `$2007` is one, with its strobe. The board
+drives the two CIRAM lines on every presentation, `CIRAM /CE` enabling the console's 2 KB of
+nametable RAM and `CIRAM A10` selecting which kilobyte, and drives the data lines on a read it
+answers (NESdev wiki, "Cartridge connector", Signal descriptions; "PPU rendering", PPU address bus
+contents).
 
 ```cpp
 struct CpuPins {
@@ -406,7 +410,7 @@ struct PpuPins {
 ```
 
 An NROM board answering a fetch, an address it leaves alone, a store to its PRG RAM, a pattern
-table read and a nametable access:
+table read, a nametable access and an address alone:
 
 ```cpp
 std::vector<std::uint8_t> image =
@@ -434,15 +438,19 @@ const bool console = neasant::boardPpuAccess(board, cartridge, name, chrRam);
 // console == false: the board leaves a nametable access to the console's RAM
 // name.ciramEnable == true and name.ciramA10 == false: $2400 reaches the first kilobyte
 // under horizontal mirroring
+neasant::PpuPins opening{.address = 0x2800, .data = 0x5A};  // neither strobe: an address alone
+neasant::boardPpuAccess(board, cartridge, opening, chrRam);
+// opening.ciramEnable == true and opening.ciramA10 == true: the CIRAM lines follow the address
+// opening.data == 0x5A: nothing is read
 ```
 
 ## The board
 
 Every board is a struct holding its own state, and `Board` is the variant over them. `boardFor`
 builds the board a cartridge's mapper number names, and refuses a mapper that is not built, or a
-cartridge whose sizes or layout the named board does not have. The three dispatch functions
-present one CPU cycle or one PPU access to the board held, and answer the mirroring the board
-drives. A board is added by declaring its struct and its three functions in its own header and
+cartridge whose sizes or layout the named board does not have. The three dispatch functions present
+one CPU cycle or one presentation of the PPU's pins to the board held, and answer the mirroring the
+board drives. A board is added by declaring its struct and its three functions in its own header and
 naming it in the variant.
 
 ```cpp
@@ -458,8 +466,9 @@ using Board = std::variant<Nrom>;
 bool boardCpuCycle(Board& board, const Cartridge& cartridge, CpuPins& pins,
                    std::span<std::uint8_t> prgRam);
 
-// One PPU access on the pins, dispatched likewise. The board drives the CIRAM lines
-// every time; true when it answered the access itself.
+// One presentation of the PPU's pins, dispatched likewise: an access with its strobe,
+// or the address alone that opens a fetch. The board drives the CIRAM lines every time;
+// true when the address is one the board answers itself.
 bool boardPpuAccess(Board& board, const Cartridge& cartridge, PpuPins& pins,
                     std::span<std::uint8_t> chrRam);
 
@@ -492,7 +501,8 @@ bool cpuCycle(Nrom&, const Cartridge& cartridge, CpuPins& pins, std::span<std::u
 // The PPU's access on the pins. Drives the CIRAM lines on every presentation — enabled
 // for $2000-$3FFF, A10 from PPU A11 under horizontal mirroring and PPU A10 under vertical —
 // and answers the pattern tables, $0000-$1FFF, from the CHR ROM or RAM: true for those
-// addresses, false above them.
+// addresses, false above them. A presentation with neither strobe low, an address alone,
+// moves the CIRAM lines and reads and writes nothing.
 bool ppuAccess(Nrom&, const Cartridge& cartridge, PpuPins& pins, std::span<std::uint8_t> chrRam);
 
 // The mirroring the board is wired for.
@@ -587,6 +597,8 @@ neasant::boardPpuAccess(board, cartridge, right, chrRam);
   holding the open-bus byte and comes back untouched when `boardCpuCycle` answers false.
 - **A PPU access drives the CIRAM lines whether or not the board answers it.** A board answering
   false has still set `ciramEnable` and `ciramA10`.
+- **A fetch is presented twice.** The address alone on its first dot, with `read` and `write` both
+  false, and the read on its second; a board that counts accesses counts the strobes.
 
 ## What remains open
 

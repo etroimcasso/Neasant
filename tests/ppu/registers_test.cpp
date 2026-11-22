@@ -933,6 +933,11 @@ TEST(PpuPowerOn, ResetResetsThePpuWithTheCpu) {
     s.ppu.odd = true;
   });
   EXPECT_EQ(m.run(1000u * 12u), 1000u * 12u);
+  // 3000 dots of rendering from dot 200 of scanline 100 have moved the current address:
+  // nine steps of Y take fine Y 2 and coarse Y 8 to fine Y 3 and coarse Y 9, and on
+  // scanline 109 sixteen steps of coarse X, from the 18 that `t`'s 16 and dots 328 and
+  // 336 leave, take it past 31 into the nametable beside, to 2.
+  EXPECT_EQ(m.state().ppu.v, 0x3122);
   const std::uint64_t before = m.state().master;
   m.reset();
   const PpuState& p = m.state().ppu;
@@ -940,7 +945,7 @@ TEST(PpuPowerOn, ResetResetsThePpuWithTheCpu) {
   EXPECT_EQ(p.mask, 0);
   EXPECT_TRUE(p.vblank);
   EXPECT_EQ(p.oamAddr, 0x12);
-  EXPECT_EQ(p.v, 0x2108);
+  EXPECT_EQ(p.v, 0x3122);
   EXPECT_EQ(p.t, 0);
   EXPECT_EQ(p.x, 0);
   EXPECT_FALSE(p.w);

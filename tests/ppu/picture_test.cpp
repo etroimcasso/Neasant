@@ -20,16 +20,16 @@
 // The picture and its observer. On a bare chip: the dot each position is resolved on,
 // four behind the counter; the picture's 240 lines and nothing past them; the three dots
 // the chip marks; the skip's frame end; with rendering disabled the backdrop or the entry
-// `v` points at, greyscale and each emphasis bit; with rendering enabled the backdrop
-// alone; an entry and the mask changed mid-line; and the chip the same with no picture
-// held. On the machine: the observer as the host's object outside the state; the report
-// in the cycle the vertical blank begins, before the frame's NMI, with a pad set inside
-// it read by the handler; an observer set inside a picture handed the next; a set, a
-// restore and a reset dropping the picture in progress; a throw with the budget owed;
-// two machines equal watched and unwatched, with the parity; a copy with its own
-// picture; and whole pictures as the chip drew them. A case that checks a hardware rule
-// names the document and section it is read from; the rest check the machine's own
-// surface.
+// `v` points at, greyscale and each emphasis bit; with rendering enabled over a blank
+// pattern table the backdrop alone; an entry and the mask changed mid-line; and the chip
+// the same with no picture held. On the machine: the observer as the host's object
+// outside the state; the report in the cycle the vertical blank begins, before the
+// frame's NMI, with a pad set inside it read by the handler; an observer set inside a
+// picture handed the next; a set, a restore and a reset dropping the picture in
+// progress; a throw with the budget owed; two machines equal watched and unwatched, with
+// the parity; a copy with its own picture; and whole pictures as the chip drew them. A
+// case that checks a hardware rule names the document and section it is read from; the
+// rest check the machine's own surface.
 
 namespace {
 
@@ -380,10 +380,10 @@ TEST(PpuPicture, EachEmphasisBitRidesAboveTheEntry) {
   EXPECT_EQ(dotEmphasis(0x16), 0);
 }
 
-// With rendering enabled, either bit, every position is the backdrop and `v` names no
-// entry: no tile is fetched, so every pixel is transparent, and the override belongs to
-// rendering disabled (NESdev wiki, "PPU rendering", Drawing overview and Rendering
-// disabled; "PPU palettes", Backdrop override).
+// With rendering enabled, either bit, over a pattern table of zeros every position is
+// the backdrop and `v` names no entry: every pixel fetched is transparent, and the
+// override belongs to rendering disabled (NESdev wiki, "PPU rendering", Drawing overview
+// and Rendering disabled; "PPU palettes", Backdrop override).
 TEST(PpuPicture, WithRenderingEnabledEveryPositionIsTheBackdropAndVDoesNotOverride) {
   Chip chip;
   chip.state.palette[0x00] = 0x21;

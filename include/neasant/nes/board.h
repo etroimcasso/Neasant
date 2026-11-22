@@ -27,8 +27,9 @@ using Board = std::variant<Nrom>;
 bool boardCpuCycle(Board& board, const Cartridge& cartridge, CpuPins& pins,
                    std::span<std::uint8_t> prgRam);
 
-// One PPU access on the pins, dispatched likewise. The board drives the CIRAM lines
-// every time; true when it answered the access itself.
+// One presentation of the PPU's pins, dispatched likewise: an access with its strobe,
+// or the address alone that opens a fetch. The board drives the CIRAM lines every time;
+// true when the address is one the board answers itself.
 bool boardPpuAccess(Board& board, const Cartridge& cartridge, PpuPins& pins,
                     std::span<std::uint8_t> chrRam);
 

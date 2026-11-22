@@ -191,7 +191,8 @@ target_compile_definitions(ppu_programs_test PRIVATE
 # The picture and its observer: on a bare chip the dot each position is resolved on, the
 # picture's 240 lines and nothing past them, the three marked dots, the skip's frame end,
 # the backdrop and the entry v points at with rendering disabled, greyscale, each
-# emphasis bit, the backdrop alone with rendering enabled, an entry changed mid-line, and
+# emphasis bit, the backdrop alone with rendering enabled over a blank pattern table, an
+# entry changed mid-line, and
 # the chip the same with no picture held; on the machine the observer as the host's
 # object, the report in the cycle the vertical blank begins and before the frame's NMI
 # with a pad set inside it, an observer set mid-picture handed the next, the three drops,
@@ -200,3 +201,20 @@ target_compile_definitions(ppu_programs_test PRIVATE
 # harness and the authored-image helpers are the machine tests'.
 neasant_add_test(ppu_picture_test ppu/picture_test.cpp nes/rom_harness.cpp)
 target_include_directories(ppu_picture_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
+
+# The background: on a bare chip a tile's four accesses of two dots with the address
+# lines, the console's latch and the fetch latches dot by dot, the pattern table's half,
+# the kilobyte of nametable RAM the board selects, the address alone the board is
+# presented on a fetch's first dot, a line's accesses in eights, the scanlines the
+# background runs on, the nametable fetches of dots 257-320 and 337-340, dot 0's address
+# and the read an odd frame's skip leaves in its place, the steps and copies of v, the
+# shift registers' shifts and reloads, the pixel the fine X scroll picks and its two dots
+# to the picture, the palette beside it, the hidden background and left column, rendering
+# disabled, and a $2001 write reaching it all on its third dot; on the machine a tile where
+# the nametable puts it, an attribute byte's quarters, each fine X and fine Y, a scroll
+# across both nametable seams, coarse Y past 29, the left column, the pattern table's
+# half, the sprites alone, a program drawing through the ports, and machines equal watched,
+# unwatched and restored. The harness and the authored-image helpers are the machine
+# tests'.
+neasant_add_test(ppu_background_test ppu/background_test.cpp nes/rom_harness.cpp)
+target_include_directories(ppu_background_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
