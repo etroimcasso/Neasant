@@ -2,10 +2,10 @@
 
 // The NES as a machine around the 6502: the master clock and its budget, the bus as the
 // console decodes it, the 2 KB of work RAM, the open bus, the PPU with its ports, its
-// memories, its frame and its NMI output, the APU's frame counter, status register, five
-// channels and mixer with the samples a host drains, the two controller ports with the
-// pads plugged into them, the DMA unit on the CPU's RDY line, and the cartridge on its
-// board behind the pins.
+// memories, its frame, its picture and its NMI output, the APU's frame counter, status
+// register, five channels and mixer with the samples a host drains, the two controller
+// ports with the pads plugged into them, the DMA unit on the CPU's RDY line, and the
+// cartridge on its board behind the pins.
 //
 // A machine is built from one config value and is at power-on from then: the CPU's
 // reset sequence is pending, every RAM holds the seed, and the first seven cycles run
@@ -23,15 +23,17 @@
 // alignment are the machine's fixed identity and are not in the state. A host that
 // wants to see the bus rather than the state sets a bus observer, told every access as
 // it settles; a host keeping a save sets a save observer, told when the cartridge's
-// battery-backed PRG RAM has changed. Both are the host's objects, outside the state.
-// The sound leaves as frames, one sample of the console's one output each, which a host
-// drains with takeFrames(); they are output and outside the state too.
+// battery-backed PRG RAM has changed; a host that wants the picture sets a frame
+// observer, handed each picture the PPU finishes. All three are the host's objects,
+// outside the state. The sound leaves as frames, one sample of the console's one output
+// each, which a host drains with takeFrames(); they are output and outside the state too.
 
 #include "neasant/apu/apu.h"
 #include "neasant/cpu/cpu6502.h"
 #include "neasant/nes/board.h"
 #include "neasant/nes/cartridge.h"
 #include "neasant/nes/clock.h"
+#include "neasant/nes/video_frame.h"
 #include "neasant/ppu/ppu.h"
 
 #include <array>
@@ -307,11 +309,11 @@ class Nes {
   // zero, the PPU with its registers at their power-on values, its
   // vertical-blank flag as the config says, its warm-up window open and its counter at
   // the first dot (NESdev wiki, "PPU power up state"), the ports empty with their
-  // registers clear, the DMA unit idle, no observer set, no frame queued, and the master
-  // counter at zero. The first seven cycles run the reset sequence to the reset vector.
-  // Throws std::invalid_argument as NesConfig says. A machine is copied and moved whole:
-  // the state, the image, the board, the observer pointers and the frames not yet
-  // drained go with it.
+  // registers clear, the DMA unit idle, no observer set, no frame queued, the picture's
+  // storage allocated, and the master counter at zero. The first seven cycles run the
+  // reset sequence to the reset vector. Throws std::invalid_argument as NesConfig says. A
+  // machine is copied and moved whole: the state, the image, the board, the observer
+  // pointers, the picture's storage and the frames not yet drained go with it.
   explicit Nes(NesConfig config);
 
   // The whole machine as a value. state() answers the machine's own state without
@@ -321,9 +323,9 @@ class Nes {
   // std::invalid_argument, and leaves the machine as it was, for a state whose PRG RAM
   // or CHR RAM is another size than this machine's or whose board is another kind:
   // those are the cartridge's, fixed for the machine's life, so such a state is a
-  // snapshot of another cartridge. A restore discards the frames not yet drained, and
-  // one that leaves the save other than as the save observer last received it is
-  // reported to that observer, with the state in place.
+  // snapshot of another cartridge. A restore discards the frames not yet drained and
+  // drops the picture in progress, and one that leaves the save other than as the save
+  // observer last received it is reported to that observer, with the state in place.
   [[nodiscard]] const NesState& state() const noexcept { return state_; }
   void restore(const NesState& state);
 
@@ -340,8 +342,8 @@ class Nes {
   // address and its memories kept. Work RAM, PRG RAM, CHR RAM, the open
   // bus, the strobe, the shift registers, the pads, the DMA page, the master counters
   // and the observers keep what they hold, and the output keeps its place in the sample
-  // under way; the frames not yet drained are discarded. Call it between step() and
-  // run() calls.
+  // under way; the frames not yet drained are discarded and the picture in progress is
+  // dropped. Call it between step() and run() calls.
   void reset();
 
   // The region the machine was built for, the CPU-PPU alignment it was built with, the
@@ -362,8 +364,10 @@ class Nes {
   // put or the DMC's fetch, and on the unit's halt, dummy and alignment cycles the halted
   // CPU repeats its read. A jammed core repeats its idle read. A fresh machine's first
   // seven cycles are the reset sequence. The overshoot run() carries is unchanged. A
-  // cycle that ends a frame is followed by the save observer's report, which may throw
-  // (SaveObserver) after the cycle and its twelve master cycles are accounted for.
+  // cycle in which the picture's vertical blank begins is followed by the frame
+  // observer's report and a cycle that ends a frame by the save observer's; either may
+  // throw (FrameObserver, SaveObserver) after the cycle and its twelve master cycles are
+  // accounted for.
   std::uint64_t step();
 
   // Runs whole machine cycles until the machine stands at least `budget` master cycles
@@ -371,8 +375,9 @@ class Nes {
   // machine advanced in this call. A budget that ends inside a machine cycle finishes
   // the cycle; the overshoot is credited to the next call, so run(a) then run(b) lands
   // where run(a + b) does, and run(0) runs nothing. The budget is accounted for as the
-  // call begins: a save observer's report made inside the call may throw (SaveObserver),
-  // and the cycles not yet run are then owed to the next call, which spends them first.
+  // call begins: a frame observer's or a save observer's report made inside the call may
+  // throw (FrameObserver, SaveObserver), and the cycles not yet run are then owed to the
+  // next call, which spends them first.
   std::uint64_t run(std::uint64_t budget);
 
   // The controller in a port: a pad, or nothing, which is how the machine starts. The
@@ -401,6 +406,18 @@ class Nes {
   // save is never compared, and a cartridge without a battery never reports.
   void setSaveObserver(SaveObserver* observer) noexcept { saveObserver_ = observer; }
   [[nodiscard]] SaveObserver* saveObserver() const noexcept { return saveObserver_; }
+
+  // The observer handed every picture the PPU finishes (FrameObserver, video_frame.h),
+  // or none, which is how the machine starts; the host's object on the bus observer's
+  // terms: not part of the state, kept by restore(), pointed at by a copy. The chip
+  // stores a dot's value only while one is set, and resolves every dot and runs exactly
+  // the same with none. A picture is handed over whole or not at all: one every dot of
+  // which was resolved while an observer was set, with no restore() or reset() inside
+  // it. Every call here drops the picture in progress, with the same pointer or another,
+  // null included, so the first report after a call is the first picture begun after
+  // it, as it is after a restore() or a reset(); a picture begins on dot 4 of scanline 0.
+  void setFrameObserver(FrameObserver* observer) noexcept;
+  [[nodiscard]] FrameObserver* frameObserver() const noexcept { return frameObserver_; }
 
   // The save's size: the PRG RAM's on a cartridge with a battery, 0 on one without. A
   // save observer is handed this many bytes.
@@ -475,8 +492,10 @@ class Nes {
 
   // One machine cycle: the dots that fall before M2 rises, the cycle's one bus access,
   // the dots that fall after, the APU's tick and its output's cycle, the NMI and IRQ
-  // lines, then the counters. Answers whether one of its dots ended a frame.
-  bool machineCycle();
+  // lines, then the counters. A dot that begins a picture marks it whole or not by
+  // whether a frame observer is set. Answers the vertical blank's dot or the frame's end
+  // when one of its dots was that, else none; the three dots of a cycle hold at most one.
+  PpuDotEvent machineCycle();
   // The cycle's one bus access: the DMC's fetch on its get cycle, else the OAM DMA
   // unit's get or put while a transfer holds the bus, else the CPU's, held when a unit
   // halts or holds it.
@@ -484,13 +503,21 @@ class Nes {
   // The CPU's cycle on the bus, halted or not.
   void cpuCycle();
 
+  // The reports a cycle's dot owes: the picture's after the vertical blank's dot, the
+  // save's after the frame's end.
+  void report(PpuDotEvent event);
+  // Hands the frame observer the picture, when one is set and the picture is whole; a
+  // throw out of the report leaves the picture reported. Made after the cycle in which
+  // the vertical blank began.
+  void reportPicture();
   // Tells the save observer the save, when one is set and the save differs from the
   // bytes it last received, and keeps those bytes as what it received. Made after a
   // cycle that ended a frame and by restore().
   void reportSave();
 
   // The chip's inputs as this machine supplies them: its board and cartridge, its CHR
-  // RAM, and the I/O bus decay in whole dots.
+  // RAM, the I/O bus decay in whole dots, and the picture's storage while a frame
+  // observer is set.
   [[nodiscard]] PpuInputs ppuInputs() noexcept;
 
   NesState state_;
@@ -502,6 +529,15 @@ class Nes {
   std::uint32_t audioRate_;
   BusObserver* observer_ = nullptr;
   SaveObserver* saveObserver_ = nullptr;
+  FrameObserver* frameObserver_ = nullptr;
+  // The picture's storage, kPictureDots values the chip writes as it resolves each dot
+  // while a frame observer is set: output, not part of the state, sized at construction
+  // and never resized; a copy of the machine copies it.
+  std::vector<std::uint16_t> picture_ = std::vector<std::uint16_t>(kPictureDots);
+  // Whether the picture in progress is whole so far: true from its first dot resolved
+  // with a frame observer set, false after setFrameObserver(), restore() or reset(). Not
+  // part of the state.
+  bool pictureWhole_ = false;
   // The save as the save observer last received it: the seed at construction, then
   // what each report hands over. Sized with the PRG RAM on a cartridge with a battery,
   // empty on one without; the host's view of the save, not part of the state.

@@ -187,3 +187,16 @@ neasant_add_test(ppu_programs_test ppu/programs_test.cpp nes/rom_harness.cpp)
 target_include_directories(ppu_programs_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
 target_compile_definitions(ppu_programs_test PRIVATE
   NEASANT_NES_TEST_ROMS="${NEASANT_NES_TEST_ROMS}")
+
+# The picture and its observer: on a bare chip the dot each position is resolved on, the
+# picture's 240 lines and nothing past them, the three marked dots, the skip's frame end,
+# the backdrop and the entry v points at with rendering disabled, greyscale, each
+# emphasis bit, the backdrop alone with rendering enabled, an entry changed mid-line, and
+# the chip the same with no picture held; on the machine the observer as the host's
+# object, the report in the cycle the vertical blank begins and before the frame's NMI
+# with a pad set inside it, an observer set mid-picture handed the next, the three drops,
+# a throw with the budget owed, two machines equal watched and unwatched with the
+# parity, a copy with its own picture, and whole pictures as the chip drew them. The
+# harness and the authored-image helpers are the machine tests'.
+neasant_add_test(ppu_picture_test ppu/picture_test.cpp nes/rom_harness.cpp)
+target_include_directories(ppu_picture_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)

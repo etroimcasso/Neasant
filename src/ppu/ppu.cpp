@@ -28,6 +28,14 @@ constexpr std::uint8_t kMaskLagDots = 3;
 constexpr std::uint16_t kAddressMask = 0x3FFF;
 constexpr std::uint16_t kPaletteBase = 0x3F00;
 
+// The picture's dots: position x of line y is resolved on dot x + 4 of scanline y, the
+// chip's output running four dots behind its counter, so a line's 256 positions take
+// dots 4-259 and lines 0-239 are the picture (NESdev wiki, "PPU rendering", Drawing
+// overview, and Cycles 1-256: the first pixel is output during cycle 4; its frame timing
+// diagram's notes: actual pixel output has a 4-dot delay).
+constexpr std::uint16_t kFirstPictureDot = 4;
+constexpr std::uint16_t kLastPictureLine = 239;
+
 // NESdev wiki, "PPU registers", PPUMASK, Rendering control: rendering is enabled while
 // either of bits 4 and 3 of $2001 is.
 [[nodiscard]] bool renderingEnabled(std::uint8_t mask) noexcept {
@@ -63,6 +71,18 @@ constexpr std::uint16_t kPaletteBase = 0x3F00;
 [[nodiscard]] std::uint8_t oamByte(const PpuState& state, std::uint8_t address) noexcept {
   const std::uint8_t byte = state.oam[address];
   return (address & 0x03u) == 0x02u ? static_cast<std::uint8_t>(byte & 0xE3u) : byte;
+}
+
+// The value the chip drives for the picture position the dot resolves: with rendering
+// disabled the backdrop, palette entry 0, or the entry the low 14 bits of `v` name while
+// they are in the palette's range; with rendering enabled the backdrop; under greyscale,
+// with $2001's emphasis bits above it (NESdev wiki, "PPU rendering", Rendering disabled;
+// "PPU palettes", Backdrop override; "PPU registers", PPUMASK, Color control).
+[[nodiscard]] std::uint16_t pictureDot(const PpuState& state) noexcept {
+  const auto address = static_cast<std::uint16_t>(state.v & kAddressMask);
+  const bool throughV = !renderingEnabled(state.mask) && address >= kPaletteBase;
+  const std::uint8_t entry = paletteRead(state, throughV ? address : kPaletteBase);
+  return static_cast<std::uint16_t>(((state.mask & 0xE0u) << 1) | entry);
 }
 
 // Drives the bits of the I/O bus `mask` names to `value`'s and recharges them: each
@@ -282,11 +302,11 @@ std::uint8_t ppuPeekRegister(const PpuState& state, std::uint8_t port) noexcept 
   }
 }
 
-bool ppuTickDot(PpuState& state, bool statusRead) noexcept {
+PpuDotEvent ppuTickDot(PpuState& state, bool statusRead, const PpuInputs& inputs) noexcept {
   // A write to $2001 comes a dot closer to the frame counter; the dot that takes the
   // count to zero reads the write.
   if (state.maskLag != 0) --state.maskLag;
-  bool ended = false;
+  PpuDotEvent event = PpuDotEvent::None;
   if (state.scanline == kPreRenderScanline && state.dot == kSkippedFromDot && state.odd &&
       renderingAtTheCounter(state)) {
     // NESdev wiki, "PPU frame timing", Even/Odd Frames: an odd frame with rendering
@@ -294,7 +314,7 @@ bool ppuTickDot(PpuState& state, bool statusRead) noexcept {
     state.dot = 0;
     state.scanline = 0;
     state.odd = !state.odd;
-    ended = true;
+    event = PpuDotEvent::FrameEnded;
   } else {
     // NESdev wiki, "PPU frame timing", Even/Odd Frames: 341 dots a scanline, 262
     // scanlines a frame, the parity toggling every frame.
@@ -305,7 +325,7 @@ bool ppuTickDot(PpuState& state, bool statusRead) noexcept {
       if (state.scanline == kScanlinesPerFrame) {
         state.scanline = 0;
         state.odd = !state.odd;
-        ended = true;
+        event = PpuDotEvent::FrameEnded;
       }
     }
   }
@@ -315,11 +335,25 @@ bool ppuTickDot(PpuState& state, bool statusRead) noexcept {
     // $2002 that begins on the dot before the set reads the flag clear, and the flag is
     // never set for that frame. "PPU power up state": the signal that clears the flag
     // ends the internal reset.
-    if (state.scanline == kVblankScanline && !statusRead) state.vblank = true;
+    if (state.scanline == kVblankScanline) {
+      if (!statusRead) state.vblank = true;
+      event = PpuDotEvent::VerticalBlank;
+    }
     if (state.scanline == kPreRenderScanline) {
       state.vblank = false;
       state.warmingUp = false;
     }
+  }
+  // NESdev wiki, "PPU rendering", Drawing overview and Cycles 1-256, and its frame timing
+  // diagram's notes: the dot resolves the picture position four dots behind the counter,
+  // whether or not anything stores it; the store is the host's picture, when one is held.
+  if (state.scanline <= kLastPictureLine && state.dot >= kFirstPictureDot &&
+      state.dot < kFirstPictureDot + kPictureWidth) {
+    const std::size_t index = static_cast<std::size_t>(state.scanline) * kPictureWidth +
+                              static_cast<std::size_t>(state.dot - kFirstPictureDot);
+    const std::uint16_t value = pictureDot(state);
+    if (index < inputs.picture.size()) inputs.picture[index] = value;
+    if (index == 0) event = PpuDotEvent::PictureBegun;
   }
   // NESdev wiki, "PPU registers", MMIO registers: the I/O bus is a dynamic latch, and a
   // bit keeps its charge for a time after it is driven, then decays to zero.
@@ -329,7 +363,7 @@ bool ppuTickDot(PpuState& state, bool statusRead) noexcept {
       state.ioLatch = static_cast<std::uint8_t>(state.ioLatch & ~(1u << bit));
     }
   }
-  return ended;
+  return event;
 }
 
 }  // namespace neasant

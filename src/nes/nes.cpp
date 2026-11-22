@@ -186,8 +186,10 @@ void Nes::restore(const NesState& state) {
   }
   state_ = state;
   cpu_.restore(state.cpu);
-  // The frames queued belong to the run the restore replaces.
+  // The frames queued and the picture in progress belong to the run the restore
+  // replaces.
   frames_.clear();
+  pictureWhole_ = false;
   reportSave();
 }
 
@@ -211,12 +213,13 @@ void Nes::reset() {
   ppuReset(state_.ppu);
   state_.cpu = cpu_.state();
   frames_.clear();
+  pictureWhole_ = false;
 }
 
 std::uint64_t Nes::step() {
-  const bool frameEnded = machineCycle();
+  const PpuDotEvent event = machineCycle();
   state_.consumed += kMasterCyclesPerCpuCycle;
-  if (frameEnded) reportSave();
+  report(event);
   return kMasterCyclesPerCpuCycle;
 }
 
@@ -225,9 +228,7 @@ std::uint64_t Nes::run(std::uint64_t budget) {
   // The budget is accounted for before it is spent, so a save report that throws out
   // of the loop leaves the cycles not yet run owed to the next call.
   state_.consumed += budget;
-  while (state_.master < state_.consumed) {
-    if (machineCycle()) reportSave();
-  }
+  while (state_.master < state_.consumed) report(machineCycle());
   return state_.master - start;
 }
 
@@ -237,6 +238,11 @@ void Nes::setJoypad(JoypadPort port, std::optional<Joypad> pad) noexcept {
 
 const std::optional<Joypad>& Nes::joypad(JoypadPort port) const noexcept {
   return state_.pads[static_cast<std::size_t>(port)];
+}
+
+void Nes::setFrameObserver(FrameObserver* observer) noexcept {
+  frameObserver_ = observer;
+  pictureWhole_ = false;
 }
 
 std::vector<std::int16_t> Nes::takeFrames() {
@@ -265,6 +271,23 @@ void Nes::observe(std::uint16_t address, std::uint8_t value, bool write, CycleKi
       .address = address, .value = value, .write = write, .kind = kind, .source = source});
 }
 
+void Nes::report(PpuDotEvent event) {
+  if (event == PpuDotEvent::VerticalBlank) reportPicture();
+  if (event == PpuDotEvent::FrameEnded) reportSave();
+}
+
+void Nes::reportPicture() {
+  if (frameObserver_ == nullptr || !pictureWhole_) return;
+  // The picture is marked reported before the report, so a report that throws is not
+  // made again.
+  pictureWhole_ = false;
+  frameObserver_->frame(VideoFrame{.dots = picture_,
+                                   .width = kPictureWidth,
+                                   .height = kPictureHeight,
+                                   .region = region_,
+                                   .odd = state_.ppu.odd});
+}
+
 void Nes::reportSave() {
   if (saveObserver_ == nullptr || saveReference_.empty()) return;
   if (state_.prgRam == saveReference_) return;
@@ -275,7 +298,9 @@ void Nes::reportSave() {
 
 PpuInputs Nes::ppuInputs() noexcept {
   return PpuInputs{state_.board, cartridge_, state_.chrRam,
-                   static_cast<std::uint32_t>(ppuOpenBusDecay_ / kMasterCyclesPerDot)};
+                   static_cast<std::uint32_t>(ppuOpenBusDecay_ / kMasterCyclesPerDot),
+                   frameObserver_ != nullptr ? std::span<std::uint16_t>(picture_)
+                                             : std::span<std::uint16_t>{}};
 }
 
 Nes::Target Nes::decode(std::uint16_t address) noexcept {
@@ -557,24 +582,34 @@ void Nes::busCycle() {
   }
 }
 
-bool Nes::machineCycle() {
+PpuDotEvent Nes::machineCycle() {
   // The dots whose master cycle falls before M2 rises, then the cycle's one access,
   // then the dots that fall after it, which a read of $2002 under way is told (NESdev
   // wiki, "PPU frame timing", VBL Flag Timing), then the APU's tick and a cycle of its
   // output, then the two lines as the CPU samples them at the cycle's end (NESdev wiki,
   // "CPU interrupts", Detailed interrupt behavior: the edge and level detectors sample
-  // during the second half of each cycle).
+  // during the second half of each cycle). The dots write the picture while a frame
+  // observer is set, and the dot that begins a picture marks it whole by that.
   const std::uint64_t access = state_.master + kMasterCyclesToM2Rise;
   const std::uint64_t end = state_.master + kMasterCyclesPerCpuCycle;
-  bool frameEnded = false;
+  const PpuInputs inputs = ppuInputs();
+  PpuDotEvent event = PpuDotEvent::None;
+  const auto tick = [&](bool statusRead) {
+    const PpuDotEvent dot = ppuTickDot(state_.ppu, statusRead, inputs);
+    if (dot == PpuDotEvent::PictureBegun) {
+      pictureWhole_ = frameObserver_ != nullptr;
+    } else if (dot != PpuDotEvent::None) {
+      event = dot;
+    }
+  };
   while (state_.dotClock < access) {
-    if (ppuTickDot(state_.ppu, false)) frameEnded = true;
+    tick(false);
     state_.dotClock += kMasterCyclesPerDot;
   }
   statusRead_ = false;
   busCycle();
   while (state_.dotClock < end) {
-    if (ppuTickDot(state_.ppu, statusRead_)) frameEnded = true;
+    tick(statusRead_);
     state_.dotClock += kMasterCyclesPerDot;
   }
   apuTickCycle(state_.apu, state_.apuPhase);
@@ -589,7 +624,7 @@ bool Nes::machineCycle() {
   state_.master = end;
   state_.apuPhase = static_cast<std::uint8_t>(state_.apuPhase ^ 1u);
   state_.cpu = cpu_.state();
-  return frameEnded;
+  return event;
 }
 
 }  // namespace neasant

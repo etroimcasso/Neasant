@@ -35,6 +35,7 @@ using neasant::Mirroring;
 using neasant::Nes;
 using neasant::NesConfig;
 using neasant::NesState;
+using neasant::PpuDotEvent;
 using neasant::PpuInputs;
 using neasant::ppuNmiAsserted;
 using neasant::ppuPeekRegister;
@@ -405,7 +406,7 @@ TEST(PpuPorts, TheBusDecaysBitByBitAfterTheCount) {
   Chip chip;
   chip.inputs.busDecayDots = 10;
   const auto tick = [&chip](int dots) {
-    for (int i = 0; i < dots; ++i) ppuTickDot(chip.state, false);
+    for (int i = 0; i < dots; ++i) ppuTickDot(chip.state, false, chip.inputs);
   };
   chip.write(5, 0xFF);
   EXPECT_EQ(chip.state.ioLatchDecay[0], 10u);
@@ -590,15 +591,16 @@ TEST(PpuPorts, ResetKeepsWhatItKeeps) {
 TEST(PpuFrame, TheFlagSetsAtDot1OfScanline241AndClearsAtDot1OfScanline261) {
   // NESdev wiki, "NMI", Operation; "PPU frame timing", VBL Flag Timing: 6820 dots
   // apart; "PPU power up state": the clear ends the warm-up.
+  Chip chip;
   PpuState p;
-  const auto tick = [&p](int dots) {
-    for (int i = 0; i < dots; ++i) ppuTickDot(p, false);
+  const auto tick = [&p, &chip](int dots) {
+    for (int i = 0; i < dots; ++i) ppuTickDot(p, false, chip.inputs);
   };
   tick(82181);
   EXPECT_EQ(p.scanline, 241);
   EXPECT_EQ(p.dot, 0);
   EXPECT_FALSE(p.vblank);
-  EXPECT_FALSE(ppuTickDot(p, false));
+  EXPECT_EQ(ppuTickDot(p, false, chip.inputs), PpuDotEvent::VerticalBlank);
   EXPECT_EQ(p.dot, 1);
   EXPECT_TRUE(p.vblank);
   EXPECT_TRUE(p.warmingUp);
@@ -606,14 +608,14 @@ TEST(PpuFrame, TheFlagSetsAtDot1OfScanline241AndClearsAtDot1OfScanline261) {
   EXPECT_EQ(p.scanline, 261);
   EXPECT_EQ(p.dot, 0);
   EXPECT_TRUE(p.vblank);
-  EXPECT_FALSE(ppuTickDot(p, false));
+  EXPECT_EQ(ppuTickDot(p, false, chip.inputs), PpuDotEvent::None);
   EXPECT_EQ(p.dot, 1);
   EXPECT_FALSE(p.vblank);
   EXPECT_FALSE(p.warmingUp);
   tick(339);
   EXPECT_EQ(p.scanline, 261);
   EXPECT_EQ(p.dot, 340);
-  EXPECT_TRUE(ppuTickDot(p, false));
+  EXPECT_EQ(ppuTickDot(p, false, chip.inputs), PpuDotEvent::FrameEnded);
   EXPECT_EQ(p.scanline, 0);
   EXPECT_EQ(p.dot, 0);
   EXPECT_TRUE(p.odd);
@@ -622,13 +624,14 @@ TEST(PpuFrame, TheFlagSetsAtDot1OfScanline241AndClearsAtDot1OfScanline261) {
 TEST(PpuFrame, AStatusReadUnderWayBlocksTheSet) {
   // NESdev wiki, "PPU frame timing", VBL Flag Timing: a read one dot before the set
   // reads the flag clear and the flag is never set that frame.
+  Chip chip;
   PpuState p;
-  for (int i = 0; i < 82181; ++i) ppuTickDot(p, false);
-  EXPECT_FALSE(ppuTickDot(p, true));
+  for (int i = 0; i < 82181; ++i) ppuTickDot(p, false, chip.inputs);
+  EXPECT_EQ(ppuTickDot(p, true, chip.inputs), PpuDotEvent::VerticalBlank);
   EXPECT_EQ(p.scanline, 241);
   EXPECT_EQ(p.dot, 1);
   EXPECT_FALSE(p.vblank);
-  for (int i = 0; i < 6820; ++i) ppuTickDot(p, false);
+  for (int i = 0; i < 6820; ++i) ppuTickDot(p, false, chip.inputs);
   EXPECT_EQ(p.scanline, 261);
   EXPECT_EQ(p.dot, 1);
   EXPECT_FALSE(p.vblank);
@@ -637,11 +640,12 @@ TEST(PpuFrame, AStatusReadUnderWayBlocksTheSet) {
 TEST(PpuFrame, AnOddFrameSkipsADotWithRenderingEnabled) {
   // NESdev wiki, "PPU frame timing", Even/Odd Frames; "PPU registers", PPUMASK,
   // Rendering control: either enable bit enables rendering.
+  Chip chip;
   PpuState p;
   p.warmingUp = false;
-  const auto frame = [&p] {
+  const auto frame = [&p, &chip] {
     int dots = 1;
-    while (!ppuTickDot(p, false)) ++dots;
+    while (ppuTickDot(p, false, chip.inputs) != PpuDotEvent::FrameEnded) ++dots;
     return dots;
   };
   p.mask = 0x08;

@@ -6,7 +6,8 @@
 // a status byte at $6000, the bytes $DE $B0 $61 at $6001-$6003 and their text from
 // $6004 (the suites' readmes, "Output at $6000"), which the cartridge's PRG RAM holds;
 // the older ones print their result on the screen (the readmes of cpu_dummy_reads and
-// branch_timing_tests), which the console's nametable RAM holds.
+// branch_timing_tests), which the console's nametable RAM holds. Beside them, a frame
+// observer that keeps the last picture the machine hands over.
 
 #include "neasant/nes/nes.h"
 
@@ -49,5 +50,18 @@ struct RomResult {
 // tile index read as its character code, a row ending at its last character that is
 // not a space, rows joined by newlines.
 [[nodiscard]] std::string screenText(const NesState& state);
+
+// A frame observer that keeps the last picture handed over, with its size, region and
+// parity, and counts the pictures: a case reads the picture out of it after a run.
+struct PictureKeeper final : FrameObserver {
+  // The last picture, row-major from the top line; empty until one arrives.
+  std::vector<std::uint16_t> dots;
+  unsigned width = 0;
+  unsigned height = 0;
+  Region region = Region::Ntsc;
+  bool odd = false;
+  std::uint64_t pictures = 0;
+  void frame(const VideoFrame& frame) override;
+};
 
 }  // namespace neasant::nes_tests

@@ -77,6 +77,15 @@ std::optional<std::vector<std::uint8_t>> loadRom(const std::string& path) {
                                    std::istreambuf_iterator<char>());
 }
 
+void PictureKeeper::frame(const VideoFrame& frame) {
+  dots.assign(frame.dots.begin(), frame.dots.end());
+  width = frame.width;
+  height = frame.height;
+  region = frame.region;
+  odd = frame.odd;
+  ++pictures;
+}
+
 std::string screenText(const NesState& state) {
   std::string text;
   // Both consoles print at the nametable at $2000 and both boards put it in the first

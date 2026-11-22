@@ -6,13 +6,15 @@ console decodes it, the 2 KB of work RAM and the open bus, the PPU's register fi
 unit on the CPU's RDY line, and the cartridge on its board behind the pins
 ([its own page](nes-cartridge.md)). A host builds a machine from one config value, steps it a
 machine cycle or a master-cycle budget at a time, holds the whole mutable machine as one
-state value, is told about the bus and the save through two observers it sets, and drains
-the sound as frames.
+state value, is told about the bus, the save and the picture through three observers it sets,
+and drains the sound as frames.
 
 The machine runs a program's code against the console's bus, its timing and its interrupts, and
-the CPU's and the APU's self-checking test programs pass on it
+the CPU's, the APU's and the PPU's self-checking test programs pass on it
 ([Testing against the programs](#testing-against-the-programs)). The PPU is its register file,
-its memories, its frame counter and its NMI output, with no tile fetched. The APU is built whole:
+its memories, its frame counter, its NMI output and its picture, each position the backdrop or
+the palette entry `v` points at with rendering disabled, no tile fetched
+([the PPU page](ppu.md#the-picture)). The APU is built whole:
 its frame counter, its five channels with the DMC fetching its samples through the DMA unit,
 both interrupts on the CPU's IRQ line, its mixer and the console's output filters, whose output
 is averaged down to the frames a host drains ([The APU](#the-apu)). PAL and Dendy are named by
@@ -39,6 +41,7 @@ machine steps is on [the 6502 core's page](6502-cpu.md).
 - [OAM DMA and the DMC's fetch](#oam-dma-and-the-dmcs-fetch)
 - [The bus observer](#the-bus-observer)
 - [The save observer](#the-save-observer)
+- [The frame observer](#the-frame-observer)
 - [Snapshot and restore](#snapshot-and-restore)
   - [Restore refuses](#restore-refuses)
   - [Determinism](#determinism)
@@ -417,17 +420,20 @@ class Nes {
   BusObserver* observer() const noexcept;
   void setSaveObserver(SaveObserver* observer) noexcept;   // told the save's changes, or none
   SaveObserver* saveObserver() const noexcept;
+  void setFrameObserver(FrameObserver* observer) noexcept; // handed every picture, or none
+  FrameObserver* frameObserver() const noexcept;
   std::size_t saveDataSize() const noexcept;               // the save's size; 0 without a battery
   std::vector<std::int16_t> takeFrames();                 // the frames queued, leaving none
   std::size_t takeFrames(std::span<std::int16_t> into) noexcept;  // into the caller's storage; the count
 };
 ```
 
-A machine is copied and moved whole: the state, the image, the board, the observer pointers and
-the frames not yet drained go with it. After construction the machine allocates only for its frame
-queue, which grows to the most frames it has held between two drains and keeps that storage; a
-machine built with an `audioRate` of 0 allocates nothing. A copy of its state allocates that
-copy's own PRG RAM and CHR RAM.
+A machine is copied and moved whole: the state, the image, the board, the observer pointers, the
+picture's storage and the frames not yet drained go with it. The picture's storage, 61 440 values,
+is allocated at construction; after it the machine allocates only for its frame queue, which
+grows to the most frames it has held between two drains and keeps that storage, and a machine
+built with an `audioRate` of 0 allocates nothing more. A copy of its state allocates that copy's
+own PRG RAM and CHR RAM.
 
 ## The reset line
 
@@ -442,6 +448,7 @@ value, and everything else keeps what it held:
 | the APU | every channel disabled with its length counter at 0, the DMC's sample stopped with its interrupt flag clear and its level's low bit kept, the frame interrupt flag clear, the triangle's sequencer at its first step, the sequence restarting on the next cycle in the mode last written to `$4017`; the inhibit bit, the halt bits, the channels' registers, timers, envelopes and sweeps, the noise's shift register, the DMC's buffer and output unit, the output stage and the output's decimator kept ([the APU page](apu.md#power-on-and-reset)) |
 | the DMA unit | a transfer or a fetch under way ends and the CPU is released; the page latch keeps its byte |
 | the frames not yet drained | discarded |
+| the picture in progress | dropped: the first picture begun after the reset is the next handed over |
 | the PPU | `$2000`, `$2001`, the temporary address, the fine X scroll, the write toggle and the read buffer cleared; the counter at dot 0 of scanline 0 of an even frame; the warm-up window open; the vertical-blank flag, the OAM address, the current address, the I/O bus and the memories kept ([the PPU page](ppu.md#the-reset-line)) |
 | work RAM, PRG RAM, CHR RAM, the open bus, the strobe, the shift registers, the pads, the master counters, the observers | what they held |
 
@@ -930,6 +937,80 @@ const std::uint64_t second = machine.run(frame);
 // second == 357372 and keeper.reports == 1: nothing changed in the second frame
 ```
 
+## The frame observer
+
+The PPU resolves the picture a dot at a time, 256 dots by 240 lines, each dot's value a palette
+entry and the three emphasis bits ([the PPU page](ppu.md#the-picture)). The frame observer is
+handed each picture the chip finishes, whole, at the end of the machine cycle in which the
+picture's vertical blank begins, dot 1 of scanline 241: after the cycle has closed and before
+the cycle that can take the frame's NMI, so a pad a host sets inside the report is the one the
+frame's handler reads. The chip stores a dot's value only while an observer is set, into storage
+the machine holds, and resolves every dot and runs exactly the same with none.
+
+`VideoFrame` is one finished picture and `FrameObserver` the class a host derives from to be
+handed them. The dots are row-major from the top line, the machine's own storage, valid for the
+call; `odd` is the frame's parity (NESdev wiki, "PPU frame timing", Even/Odd Frames).
+
+```cpp
+struct VideoFrame {
+  std::span<const std::uint16_t> dots;
+  unsigned width = kPictureWidth;
+  unsigned height = kPictureHeight;
+  Region region = Region::Ntsc;
+  bool odd = false;
+};
+
+class FrameObserver {
+ public:
+  virtual ~FrameObserver() = default;
+
+  // A picture the chip has finished, from inside step() or run(), at the end of the
+  // machine cycle in which the picture's vertical blank begins, after the cycle has
+  // closed and before the cycle that can take the frame's NMI: a pad a host sets inside
+  // the report is the one the frame's handler reads. It may throw, on
+  // SaveObserver::changed's terms: the cycle is accounted for, the machine is coherent
+  // at its end, the report is not made again, and a run() it interrupts has accounted
+  // for its whole budget.
+  virtual void frame(const VideoFrame& frame) = 0;
+};
+```
+
+A picture is handed over whole or not at all: one every dot of which was resolved while an
+observer was set, with no `restore()` or `reset()` inside it. Every call to `setFrameObserver`
+drops the picture in progress, with the same pointer or another, null included, so the first
+report after a call is the first picture begun after it, as it is after a `restore()` or a
+`reset()`; a picture begins on dot 4 of scanline 0, so an observer set before a machine's first
+cycle is handed its first picture. The report may throw, on the save observer's terms. Otherwise
+the frame observer is on the bus observer's terms: the host's object, outside the state, read
+back by `frameObserver()`, none at the start.
+
+```cpp
+struct Last final : neasant::FrameObserver {
+  std::vector<std::uint16_t> dots;
+  bool odd = false;
+  int pictures = 0;
+  void frame(const neasant::VideoFrame& picture) override {
+    dots.assign(picture.dots.begin(), picture.dots.end());
+    odd = picture.odd;
+    ++pictures;
+  }
+};
+
+std::vector<std::uint8_t> image = nromImage({0x4C, 0x00, 0x80});  // JMP $8000
+neasant::Nes machine(neasant::NesConfig{.rom = image, .vblankAtPowerOn = false});
+Last last;
+machine.setFrameObserver(&last);
+machine.run(27393u * 12u);
+// last.pictures == 0
+machine.step();
+// last.pictures == 1: dot 1 of scanline 241 fell in cycle 27393, and the picture arrived at
+//                     its end
+// last.dots.size() == 61440 and last.dots[0] == 0x00: the palette holds the seed
+// last.odd == false: the first frame is even
+machine.run(neasant::consoleClock(neasant::Region::Ntsc).masterCyclesPerFrame);
+// last.pictures == 2 and last.odd == true
+```
+
 ## Snapshot and restore
 
 The whole mutable machine is one value, `NesState`. `state()` answers it by reference, coherent
@@ -938,8 +1019,9 @@ there. The image, the region, the alignment, the decay, the constant and the out
 machine's fixed identity and are not in the state, and the observers are the host's and are not
 in it either.
 
-The frames a host has not drained are output and are not in the state: a snapshot does not carry
-them and `restore()` discards them.
+The frames a host has not drained and the picture in progress are output and are not in the
+state: a snapshot does not carry them, and `restore()` discards the frames and drops the
+picture.
 
 ```cpp
 struct NesState {
@@ -1046,9 +1128,9 @@ try {
 
 The machine reads no clock and starts no thread. Two machines built from equal configs and fed
 equal traces produce equal states at every budget boundary, equal bus streams access by access,
-equal save reports and equal frames. The trace is everything that reaches the machine from outside: the pads
-set before each run, the states restored. One machine run a frame at a time and one stepped and
-then run, each handed the same pads:
+equal save reports, equal pictures and equal frames. The trace is everything that reaches the
+machine from outside: the pads set before each run, the states restored. One machine run a frame
+at a time and one stepped and then run, each handed the same pads:
 
 ```cpp
 // LDA #$01; STA $4016; LDA #$00; STA $4016; LDA $4016; STA $10; JMP $8000
@@ -1153,8 +1235,11 @@ Every value they assert is read from a document named under [Sources](#sources).
   read-modify-write of `$4014` copies the second page it writes.
 - **The observers are not state.** A restore leaves them; a copied machine shares them; a
   snapshot restored into another machine runs with that machine's.
-- **A save report may throw, and the budget is owed.** The next `run()` spends what the throw
-  interrupted before its own.
+- **Set the frame observer before the picture begins.** A picture is handed over only if an
+  observer was set before its first dot, dot 4 of scanline 0; one set mid-picture is handed the
+  next, and every call drops the picture in progress.
+- **A save or a picture report may throw, and the budget is owed.** The next `run()` spends what
+  the throw interrupted before its own.
 - **`restore()` throws for another cartridge's snapshot.** A host restoring bytes from elsewhere
   catches it; the machine is unchanged.
 - **`reset()` between calls.** Never from inside an observer's call, which arrives part-way
@@ -1206,6 +1291,8 @@ The APU's open points are on [its page](apu.md#what-remains-open).
 
 - `include/neasant/nes/nes.h` — the config value, the state value, the pads, the observers and
   `Nes`.
+- `include/neasant/nes/video_frame.h` — the picture's size, a dot's layout, `VideoFrame` and
+  `FrameObserver`.
 - `include/neasant/nes/clock.h` — `Region`, `ConsoleClock` and `FrameDeadline`.
 - `include/neasant/apu/apu.h` — `ApuState` and the functions the machine calls, which
   [the APU page](apu.md#the-surface) lists.
@@ -1219,7 +1306,8 @@ The APU's open points are on [its page](apu.md#what-remains-open).
 
 - **NESdev wiki** — the pages "CPU memory map", "2A03", "Open bus behavior", "CPU", "CPU power up
   state", "CPU pinout", "CPU interrupts", "DMA", "APU", "Controller reading", "Standard
-  controller", "PPU frame timing" and "PPU power up state", at `https://www.nesdev.org/wiki/`.
+  controller", "PPU frame timing", "PPU rendering" and "PPU power up state", at
+  `https://www.nesdev.org/wiki/`.
 - **2A03 technical reference** — Brad Taylor, *2A03 technical reference* (2004).
 - **64doc** and **No More Secrets** — as the [CPU page](6502-cpu.md#sources) names them, for the
   constant `ANE` and `LXA` OR into A.

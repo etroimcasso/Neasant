@@ -40,6 +40,7 @@ using neasant::Mirroring;
 using neasant::Nes;
 using neasant::NesConfig;
 using neasant::NesState;
+using neasant::PpuDotEvent;
 using neasant::PpuInputs;
 using neasant::ppuPeekRegister;
 using neasant::ppuRead;
@@ -239,7 +240,7 @@ TEST(PpuOam, TheReadDrivesTheWholeBusWithTheFiveBits) {
   chip.write(4, 0xFF);
   chip.write(3, 0x06);
   chip.write(2, 0xFF);  // the bus holds $FF, every count 115 200
-  for (int i = 0; i < 10; ++i) ppuTickDot(chip.state, false);  // every count 115 190
+  for (int i = 0; i < 10; ++i) ppuTickDot(chip.state, false, chip.inputs);  // every count 115 190
   EXPECT_EQ(chip.read(4), 0xE3);
   EXPECT_EQ(chip.state.ioLatch, 0xE3);
   for (std::size_t bit = 0; bit < 8; ++bit) {
@@ -289,11 +290,11 @@ TEST(PpuSkip, TheBackgroundEnabledThreeDotsBeforeTheSkipIsRead) {
   EXPECT_EQ(chip.state.maskLag, 3);
   EXPECT_EQ(chip.state.maskBefore, 0x00);
   EXPECT_EQ(chip.state.mask, 0x08);
-  EXPECT_FALSE(ppuTickDot(chip.state, false));
+  EXPECT_EQ(ppuTickDot(chip.state, false, chip.inputs), PpuDotEvent::None);
   EXPECT_EQ(chip.state.dot, 338);
-  EXPECT_FALSE(ppuTickDot(chip.state, false));
+  EXPECT_EQ(ppuTickDot(chip.state, false, chip.inputs), PpuDotEvent::None);
   EXPECT_EQ(chip.state.dot, 339);
-  EXPECT_TRUE(ppuTickDot(chip.state, false));
+  EXPECT_EQ(ppuTickDot(chip.state, false, chip.inputs), PpuDotEvent::FrameEnded);
   EXPECT_EQ(chip.state.scanline, 0);
   EXPECT_EQ(chip.state.dot, 0);
   EXPECT_FALSE(chip.state.odd);
@@ -308,12 +309,12 @@ TEST(PpuSkip, TheBackgroundEnabledTwoDotsBeforeTheSkipIsNotRead) {
   chip.state.scanline = 261;
   chip.state.dot = 338;
   chip.write(1, 0x08);
-  EXPECT_FALSE(ppuTickDot(chip.state, false));
+  EXPECT_EQ(ppuTickDot(chip.state, false, chip.inputs), PpuDotEvent::None);
   EXPECT_EQ(chip.state.dot, 339);
-  EXPECT_FALSE(ppuTickDot(chip.state, false));
+  EXPECT_EQ(ppuTickDot(chip.state, false, chip.inputs), PpuDotEvent::None);
   EXPECT_EQ(chip.state.scanline, 261);
   EXPECT_EQ(chip.state.dot, 340);
-  EXPECT_TRUE(ppuTickDot(chip.state, false));
+  EXPECT_EQ(ppuTickDot(chip.state, false, chip.inputs), PpuDotEvent::FrameEnded);
   EXPECT_EQ(chip.state.scanline, 0);
   EXPECT_EQ(chip.state.dot, 0);
 }
@@ -328,10 +329,12 @@ TEST(PpuSkip, TheBackgroundDisabledThreeDotsBeforeTheSkipIsRead) {
   chip.state.mask = 0x08;
   chip.write(1, 0x00);
   EXPECT_EQ(chip.state.maskBefore, 0x08);
-  for (int i = 0; i < 3; ++i) EXPECT_FALSE(ppuTickDot(chip.state, false)) << "tick " << i;
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_EQ(ppuTickDot(chip.state, false, chip.inputs), PpuDotEvent::None) << "tick " << i;
+  }
   EXPECT_EQ(chip.state.scanline, 261);
   EXPECT_EQ(chip.state.dot, 340);
-  EXPECT_TRUE(ppuTickDot(chip.state, false));
+  EXPECT_EQ(ppuTickDot(chip.state, false, chip.inputs), PpuDotEvent::FrameEnded);
   EXPECT_EQ(chip.state.scanline, 0);
   EXPECT_EQ(chip.state.dot, 0);
 }
@@ -345,9 +348,9 @@ TEST(PpuSkip, TheBackgroundDisabledTwoDotsBeforeTheSkipIsNotRead) {
   chip.state.dot = 338;
   chip.state.mask = 0x08;
   chip.write(1, 0x00);
-  EXPECT_FALSE(ppuTickDot(chip.state, false));
+  EXPECT_EQ(ppuTickDot(chip.state, false, chip.inputs), PpuDotEvent::None);
   EXPECT_EQ(chip.state.dot, 339);
-  EXPECT_TRUE(ppuTickDot(chip.state, false));
+  EXPECT_EQ(ppuTickDot(chip.state, false, chip.inputs), PpuDotEvent::FrameEnded);
   EXPECT_EQ(chip.state.scanline, 0);
   EXPECT_EQ(chip.state.dot, 0);
   EXPECT_FALSE(chip.state.odd);
@@ -365,7 +368,7 @@ TEST(PpuSkip, TheLagHoldsTheTwoRenderingBitsForThreeDots) {
   chip.write(0, 0x00);
   EXPECT_EQ(chip.state.maskLag, 3);
   for (const std::uint8_t left : {std::uint8_t{2}, std::uint8_t{1}, std::uint8_t{0}}) {
-    ppuTickDot(chip.state, false);
+    ppuTickDot(chip.state, false, chip.inputs);
     EXPECT_EQ(chip.state.maskLag, left);
     EXPECT_EQ(chip.state.maskBefore, 0x18);
   }
@@ -389,7 +392,7 @@ TEST(PpuSkip, ResetDropsAWriteStillOnItsWay) {
   Chip chip;
   chip.state.mask = 0x18;
   chip.write(1, 0x00);
-  ppuTickDot(chip.state, false);
+  ppuTickDot(chip.state, false, chip.inputs);
   EXPECT_EQ(chip.state.maskLag, 2);
   EXPECT_EQ(chip.state.maskBefore, 0x18);
   ppuReset(chip.state);
@@ -406,7 +409,7 @@ TEST(PpuSkip, ASecondWriteInsideALagKeepsTheBitsTheCounterWasReading) {
   chip.write(1, 0x08);
   EXPECT_EQ(chip.state.maskBefore, 0x00);
   EXPECT_EQ(chip.state.maskLag, 3);
-  ppuTickDot(chip.state, false);
+  ppuTickDot(chip.state, false, chip.inputs);
   EXPECT_EQ(chip.state.maskLag, 2);
   chip.write(1, 0x10);
   EXPECT_EQ(chip.state.maskBefore, 0x00);

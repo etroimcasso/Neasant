@@ -5,13 +5,17 @@ its register file over a state value: the eight ports with every latch a write p
 the value and side effect of every read, the I/O bus behind them and its decay, the scroll file
 the ports fill, the port at `$2007` over the chip's own 14-bit address space, the frame counter
 that runs 341 dots by 262 scanlines, the vertical-blank flag and the NMI output it drives, the
-warm-up window after power-on and reset, and the memories the console and the chip hold:
-nametable RAM, palette RAM and object attribute memory.
+warm-up window after power-on and reset, the memories the console and the chip hold, nametable
+RAM, palette RAM and object attribute memory, and the picture, 256 dots by 240 lines, each
+resolved on its dot.
 
 The register file is what a program reads and writes, and the frame counter is what its timing
-stands on. The picture is absent: no tile is fetched and no sprite is evaluated, and a program
-that enables rendering gets the frame counter's odd-frame skip and nothing else. The chip's state
-is one value inside [the machine's](nes-machine.md), `state().ppu`, and the machine runs its dots.
+stands on. The picture is the chip's with rendering disabled: every position the backdrop, or
+the palette entry `v` points at, under greyscale and emphasis. No tile is fetched and no sprite
+is evaluated, so with rendering enabled every position is the backdrop and the frame counter
+skips its odd-frame dot. The chip's state is one value inside [the machine's](nes-machine.md),
+`state().ppu`, and the machine runs its dots and hands the picture to
+[its frame observer](nes-machine.md#the-frame-observer).
 
 The status table in the [README](../README.md) is the component's status row.
 
@@ -33,6 +37,8 @@ The status table in the [README](../README.md) is the component's status row.
 - [The frame](#the-frame)
   - [The odd-frame skip](#the-odd-frame-skip)
   - [The machine's frame](#the-machines-frame)
+- [The picture](#the-picture)
+  - [What a dot holds](#what-a-dot-holds)
 - [The NMI output](#the-nmi-output)
   - [The interrupt](#the-interrupt)
   - [The $2002 race](#the-2002-race)
@@ -51,9 +57,9 @@ The status table in the [README](../README.md) is the component's status row.
 The chip's state is one value, `PpuState`, held inside the machine's state as `NesState::ppu`; a
 snapshot of the machine carries it whole and a restore puts it back. The chip's behavior is six
 functions over that state: `ppuWrite` and `ppuRead` for a CPU access to a port,
-`ppuPeekRegister` for a read's value without its effect, `ppuTickDot` for one dot, `ppuReset` for
-the reset line, and `ppuNmiAsserted` for the NMI output. The machine calls them as its cycles run,
-and a host that runs the machine never needs to.
+`ppuPeekRegister` for a read's value without its effect, `ppuTickDot` for one dot, the picture's
+position with it, `ppuReset` for the reset line, and `ppuNmiAsserted` for the NMI output. The
+machine calls them as its cycles run, and a host that runs the machine never needs to.
 
 ```cpp
 // The chip after the reset line: $2000, $2001 with any write of it still short of the
@@ -88,11 +94,19 @@ void ppuWrite(PpuState& state, std::uint8_t port, std::uint8_t value, const PpuI
 // 241 unless a read of $2002 is under way on the CPU's bus, clears the flag and closes
 // the warm-up window at dot 1 of scanline 261, goes from dot 339 of scanline 261
 // straight to dot 0 of scanline 0 on an odd frame with rendering enabled, a write to
-// $2001 counting for that from the third dot after its access, counts each bit of the
-// I/O bus a dot closer to its decay, and answers whether this dot ended a frame (NESdev
-// wiki, "NMI", Operation; "PPU frame timing", Even/Odd Frames and VBL Flag Timing; "PPU
-// power up state"; "PPU registers", PPUMASK, Rendering control).
-bool ppuTickDot(PpuState& state, bool statusRead) noexcept;
+// $2001 counting for that from the third dot after its access, resolves the picture's
+// position for the dot on dots 4-259 of scanlines 0-239 and stores it when `inputs`
+// carries the picture, counts each bit of the I/O bus a dot closer to its decay, and
+// answers what the dot was (PpuDotEvent). Position x of line y is resolved on dot x + 4
+// of scanline y, the chip's output running four dots behind its counter; with rendering
+// disabled its value is the backdrop, palette entry 0, or the entry the low 14 bits of
+// `v` name while they are in $3F00-$3FFF, and with rendering enabled the backdrop, each
+// under greyscale and the emphasis bits as $2001 stands on that dot (NESdev wiki, "NMI",
+// Operation; "PPU frame timing", Even/Odd Frames and VBL Flag Timing; "PPU power up
+// state"; "PPU registers", PPUMASK; "PPU rendering", Drawing overview, Rendering
+// disabled and Cycles 1-256, and its frame timing diagram's notes; "PPU palettes",
+// Backdrop override).
+PpuDotEvent ppuTickDot(PpuState& state, bool statusRead, const PpuInputs& inputs) noexcept;
 
 // The chip's NMI output, true while it is pulled low: the vertical-blank flag set and
 // $2000 bit 7 set (NESdev wiki, "NMI", Operation).
@@ -102,9 +116,11 @@ bool ppuTickDot(PpuState& state, bool statusRead) noexcept;
 ```
 
 What the chip reaches through and does not hold is handed in as `PpuInputs`: the board with its
-cartridge, for the chip's address space; the CHR RAM the board writes; and the dots a bit of the
-I/O bus holds its charge after an access drives it, from the machine's config, 0 holding it for
-ever.
+cartridge, for the chip's address space; the CHR RAM the board writes; the dots a bit of the I/O
+bus holds its charge after an access drives it, from the machine's config, 0 holding it for
+ever; and the picture's storage, `kPictureDots` entries the chip writes each dot's value into as
+it resolves the dot, or empty, with which the chip resolves every dot, stores none, and runs
+exactly as it does with the storage ([The picture](#the-picture)).
 
 ```cpp
 struct PpuInputs {
@@ -112,7 +128,18 @@ struct PpuInputs {
   const Cartridge& cartridge;
   std::span<std::uint8_t> chrRam;
   std::uint32_t busDecayDots;
+  std::span<std::uint16_t> picture{};
 };
+```
+
+`ppuTickDot` answers what the dot was, beyond one more of the frame:
+
+```cpp
+// What a dot was, beyond one more of the frame: the dot that resolved the picture's
+// first position, dot 4 of scanline 0; the dot the vertical blank begins on, dot 1 of
+// scanline 241, where the flag is set; the dot that ended the frame, taking the counter
+// to dot 0 of scanline 0; or none of these, as most dots are. No dot is two of them.
+enum class PpuDotEvent : std::uint8_t { None, PictureBegun, VerticalBlank, FrameEnded };
 ```
 
 The examples on this page build their images with one helper, whose NMI vector points at an
@@ -159,8 +186,10 @@ struct PpuState {
   // "PPU scrolling", $2000 write). Bits 6-3 are held for the picture.
   std::uint8_t ctrl = 0;
   // $2001 as last written: bits 4 and 3 enable rendering, which here decides the
-  // odd-frame skip alone, and bit 0 is greyscale, which a palette read applies (NESdev
-  // wiki, "PPU registers", PPUMASK). Bits 7-5 and 2-1 are held for the picture.
+  // odd-frame skip and whether `v` names the picture's entry; bit 0 is greyscale, which
+  // a palette read and the picture apply; and bits 7-5 are the emphasis bits every dot
+  // of the picture carries (NESdev wiki, "PPU registers", PPUMASK). Bits 2-1 are held
+  // for the background and the sprites.
   std::uint8_t mask = 0;
   // A write to $2001 reaches the frame counter on the third dot after its access.
   // `maskLag` counts the dots still to pass, and while it is not zero the odd-frame skip
@@ -301,8 +330,10 @@ under [The I/O bus](#the-io-bus), [Its decay](#its-decay) and [The palette](#the
 Bit 7 of `$2000` enables the NMI output, bit 2 selects the step `v` takes after a `$2007` access,
 1 or 32, and bits 1–0 are copied into the temporary address as the nametable select; bits 6–3 are
 held for the picture. `$2001` bits 4 and 3 enable rendering, which here decides the odd-frame skip
-alone, and bit 0 is greyscale, which a palette read applies; bits 7–5 and 2–1 are held for the
-picture (NESdev wiki, "PPU registers", PPUCTRL and PPUMASK; "PPU scrolling", $2000 write).
+and whether `v` names the picture's entry; bit 0 is greyscale, which a palette read and the
+picture apply; bits 7–5 are the emphasis bits every dot of the picture carries; and bits 2–1 are
+held for the background and the sprites (NESdev wiki, "PPU registers", PPUCTRL and PPUMASK; "PPU
+scrolling", $2000 write).
 
 ```cpp
 neasant::ppuWrite(chip, 0, 0x83, inputs);
@@ -310,7 +341,8 @@ neasant::ppuWrite(chip, 0, 0x83, inputs);
 //                                         temporary address, which held $2108 from the writes
 // neasant::ppuNmiAsserted(chip) == false: bit 7 is set but the vertical-blank flag is clear
 neasant::ppuWrite(chip, 1, 0x1E, inputs);
-// chip.mask == 0x1E: rendering is enabled, which here decides the odd-frame skip alone
+// chip.mask == 0x1E: rendering is enabled, so an odd frame skips its last dot and every
+//                    position of the picture is the backdrop
 ```
 
 ### $2002
@@ -437,9 +469,9 @@ on its own; a decayed bit reads 0.
 const neasant::PpuInputs quick{board, cartridge, chrRam, 10u};  // ten dots
 neasant::ppuWrite(chip, 2, 0xFF, quick);
 // chip.ioLatchDecay[0] == 10, and so on up to chip.ioLatchDecay[7]
-for (int dot = 0; dot < 9; ++dot) neasant::ppuTickDot(chip, false);
+for (int dot = 0; dot < 9; ++dot) neasant::ppuTickDot(chip, false, quick);
 // neasant::ppuRead(chip, 0, quick) == 0xFF: nine dots on, every bit holds
-neasant::ppuTickDot(chip, false);
+neasant::ppuTickDot(chip, false, quick);
 // neasant::ppuRead(chip, 0, quick) == 0x00: on the tenth every bit fell
 ```
 
@@ -492,27 +524,36 @@ const std::uint8_t entry = neasant::ppuRead(chip, 7, inputs);
 ## The frame
 
 The counter runs 341 dots a scanline and 262 scanlines a frame, with a parity that toggles as
-each frame ends, and `ppuTickDot` steps it one dot and answers whether the dot ended a frame. The
-vertical-blank flag is set at dot 1 of scanline 241 and cleared at dot 1 of scanline 261, 6820
-dots later, where the warm-up window closes too (NESdev wiki, "NMI", Operation; "PPU frame
-timing", Even/Odd Frames and VBL Flag Timing; "PPU power up state").
+each frame ends, and `ppuTickDot` steps it one dot and answers what the dot was. The
+vertical-blank flag is set at dot 1 of scanline 241, the dot answered as `VerticalBlank`, and
+cleared at dot 1 of scanline 261, 6820 dots later, where the warm-up window closes too; the dot
+that wraps the counter is answered as `FrameEnded` (NESdev wiki, "NMI", Operation; "PPU frame
+timing", Even/Odd Frames and VBL Flag Timing; "PPU power up state"). The examples in this section
+and the next two hold no picture:
 
 ```cpp
+std::vector<std::uint8_t> image = programImage({});
+neasant::Cartridge cartridge = neasant::makeCartridge(image);
+neasant::Board board = neasant::boardFor(cartridge);
+std::vector<std::uint8_t> chrRam(cartridge.chrRamBytes);
+const neasant::PpuInputs inputs{board, cartridge, chrRam, 115200u};  // no picture held
+
 neasant::PpuState counter;
 int ticks = 0;
 while (!(counter.scanline == 241 && counter.dot == 0)) {
-  neasant::ppuTickDot(counter, false);
+  neasant::ppuTickDot(counter, false, inputs);
   ++ticks;
 }
 // ticks == 82181: scanline 241, dot 0
-neasant::ppuTickDot(counter, false);
-// counter.vblank == true: set at dot 1 of scanline 241
-for (int dot = 0; dot < 6820; ++dot) neasant::ppuTickDot(counter, false);
+const neasant::PpuDotEvent set = neasant::ppuTickDot(counter, false, inputs);
+// set == neasant::PpuDotEvent::VerticalBlank and counter.vblank == true: dot 1 of scanline 241
+for (int dot = 0; dot < 6820; ++dot) neasant::ppuTickDot(counter, false, inputs);
 // counter.scanline == 261, counter.dot == 1 and counter.vblank == false: cleared 6820 dots on
 // counter.warmingUp == false: the same dot closes the warm-up window
-bool ended = false;
-for (int dot = 0; dot < 340; ++dot) ended = neasant::ppuTickDot(counter, false);
-// ended == true: the 89342nd tick wraps the counter to scanline 0, dot 0, on an odd frame
+neasant::PpuDotEvent last = neasant::PpuDotEvent::None;
+for (int dot = 0; dot < 340; ++dot) last = neasant::ppuTickDot(counter, false, inputs);
+// last == neasant::PpuDotEvent::FrameEnded: the 89342nd tick wraps the counter to scanline 0,
+//                                           dot 0, on an odd frame
 // counter.odd == true
 ```
 
@@ -528,10 +569,10 @@ neasant::PpuState rendering;
 rendering.warmingUp = false;
 rendering.mask = 0x08;  // the background enabled: rendering is on
 int even = 0;
-while (!neasant::ppuTickDot(rendering, false)) ++even;
+while (neasant::ppuTickDot(rendering, false, inputs) != neasant::PpuDotEvent::FrameEnded) ++even;
 // even + 1 == 89342: an even frame is whole
 int odd = 0;
-while (!neasant::ppuTickDot(rendering, false)) ++odd;
+while (neasant::ppuTickDot(rendering, false, inputs) != neasant::PpuDotEvent::FrameEnded) ++odd;
 // odd + 1 == 89341: the odd frame leaves scanline 261 from dot 339
 ```
 
@@ -543,12 +584,6 @@ leaves the frame whole (NESdev wiki, "PPU registers", PPUMASK, Rendering control
 `ppu_vbl_nmi`, `10-even_odd_timing`).
 
 ```cpp
-std::vector<std::uint8_t> image = programImage({});
-neasant::Cartridge cartridge = neasant::makeCartridge(image);
-neasant::Board board = neasant::boardFor(cartridge);
-std::vector<std::uint8_t> chrRam(cartridge.chrRamBytes);
-const neasant::PpuInputs inputs{board, cartridge, chrRam, 115200u};
-
 neasant::PpuState late;
 late.warmingUp = false;
 late.odd = true;
@@ -556,10 +591,11 @@ late.scanline = 261;
 late.dot = 337;
 neasant::ppuWrite(late, 1, 0x08, inputs);  // the background enabled at dot 337
 // late.maskLag == 3 and late.maskBefore == 0x00: the counter reads the bits before the write
-neasant::ppuTickDot(late, false);  // dot 338
-neasant::ppuTickDot(late, false);  // dot 339
-const bool skipped = neasant::ppuTickDot(late, false);  // the third dot reads the write
-// skipped == true, late.scanline == 0 and late.dot == 0: the frame ended a dot short
+neasant::ppuTickDot(late, false, inputs);  // dot 338
+neasant::ppuTickDot(late, false, inputs);  // dot 339
+const neasant::PpuDotEvent third = neasant::ppuTickDot(late, false, inputs);  // reads the write
+// third == neasant::PpuDotEvent::FrameEnded, late.scanline == 0 and late.dot == 0: the frame
+//                                                                        ended a dot short
 ```
 
 ### The machine's frame
@@ -585,6 +621,71 @@ machine.run((29780u - 29668u) * 12u);
 machine.step();
 // machine.state().ppu.scanline == 0, machine.state().ppu.dot == 1 and machine.state().ppu.odd
 // == true: the frame ended inside cycle 29780
+```
+
+## The picture
+
+The chip resolves one position of the picture a dot: position `x` of line `y` on dot `x + 4` of
+scanline `y`, its output running four dots behind its counter, so a line's 256 positions take
+dots 4–259 and lines 0–239 are the picture. The border the chip drives around it is not kept.
+With rendering disabled a position is the backdrop, palette entry 0, or, while the low 14 bits of
+`v` are in `$3F00`–`$3FFF`, the entry they name through the palette's aliases; with rendering
+enabled it is the backdrop, no tile being fetched. The entry is taken under greyscale, and
+`$2001`'s emphasis bits ride above it. The chip reads `v`, the palette and `$2001` on the dot it
+resolves a position, so a write that lands between two dots shows from the next position (NESdev
+wiki, "PPU rendering", Drawing overview, Rendering disabled and Cycles 1-256, and its frame
+timing diagram's notes; "PPU palettes", Backdrop override; "PPU registers", PPUMASK).
+
+The picture's storage is the caller's, `PpuInputs::picture`: `kPictureDots` entries, 256 × 240,
+row-major from the top line. The chip writes entry `y * 256 + x` when the span holds it and
+resolves the position whether or not it does, so a chip holding no picture evolves exactly as
+one that does. The dot that resolves position 0 of line 0 is answered as `PictureBegun`. On the
+machine the storage is the machine's own, written while a frame observer is set, and each
+picture is handed over at the vertical blank
+([the machine page](nes-machine.md#the-frame-observer)).
+
+```cpp
+std::vector<std::uint8_t> image = programImage({});
+neasant::Cartridge cartridge = neasant::makeCartridge(image);
+neasant::Board board = neasant::boardFor(cartridge);
+std::vector<std::uint8_t> chrRam(cartridge.chrRamBytes);
+std::vector<std::uint16_t> picture(neasant::kPictureDots, 0xFFFF);  // a value no dot takes
+const neasant::PpuInputs held{board, cartridge, chrRam, 115200u, picture};
+
+neasant::PpuState chip;
+chip.warmingUp = false;
+chip.palette[0x00] = 0x21;
+chip.palette[0x05] = 0x16;
+for (int dot = 0; dot < 3; ++dot) neasant::ppuTickDot(chip, false, held);
+// picture[0] == 0xFFFF: dots 1-3 of scanline 0 resolve no position
+const neasant::PpuDotEvent begun = neasant::ppuTickDot(chip, false, held);
+// begun == neasant::PpuDotEvent::PictureBegun and picture[0] == 0x21: position 0 of line 0,
+//                                                                     the backdrop, on dot 4
+chip.v = 0x3F05;  // the low 14 bits in the palette's range: the entry they name is drawn
+neasant::ppuTickDot(chip, false, held);
+// picture[1] == 0x16
+chip.mask = 0x41;  // greyscale, and the green emphasis bit
+neasant::ppuTickDot(chip, false, held);
+// picture[2] == 0x90: the entry's grey column, $10, under bit 7
+// neasant::dotEntry(0x90) == 0x10 and neasant::dotEmphasis(0x90) == 2
+```
+
+### What a dot holds
+
+A dot's value is what the chip drives its video output with for that position: bits 5–0 the
+palette entry, with greyscale applied, and bits 8–6 `$2001`'s emphasis bits, bit 6 red, bit 7
+green and bit 8 blue; bits 15–9 are 0. `dotEntry` and `dotEmphasis` take the two apart, the
+emphasis as bit 0 red, bit 1 green, bit 2 blue. The value is a palette entry and a tint, not a
+colour: a host decodes the pair with a palette table of its own (NESdev wiki, "PPU registers",
+PPUMASK, Color control; "PPU palettes").
+
+```cpp
+inline constexpr unsigned kPictureWidth = 256;
+inline constexpr unsigned kPictureHeight = 240;
+inline constexpr std::size_t kPictureDots = 61440;
+
+[[nodiscard]] constexpr std::uint8_t dotEntry(std::uint16_t dot) noexcept;
+[[nodiscard]] constexpr std::uint8_t dotEmphasis(std::uint16_t dot) noexcept;
 ```
 
 ## The NMI output
@@ -786,7 +887,12 @@ machine is built with that table as `NesConfig::ramSeed`. `vbl_nmi_timing` print
   lost with it.
 - **`$3F10` is `$3F00`.** The four sprite palettes' entry 0 are the background palettes'.
 - **Greyscale changes what a palette read answers, not what it holds.**
-- **Rendering enabled changes one thing here.** The odd frame's skipped dot; no tile is fetched.
+- **Rendering enabled changes two things here.** The odd frame's skipped dot, and every position
+  of the picture is the backdrop: no tile is fetched.
+- **The picture runs four dots behind the counter.** Position `x` is resolved on dot `x + 4`; a
+  write that lands between two dots shows from the next position.
+- **The picture reads `$2001` live.** Greyscale, emphasis and the rendering bits reach the
+  picture on the first dot after the write; the three-dot lag is the odd-frame skip's.
 - **A `$2001` write reaches the frame counter on its third dot.** A write that enables the
   background within two dots of an odd frame's dot 339 leaves that frame whole.
 - **`v` steps linearly through `$2007`.** By 1 or 32, wrapping inside 15 bits; its top bit
@@ -810,13 +916,14 @@ by the documents the chip is built from.
    or one later. `06-suppression` and `5.nmi_suppression` measure the frame-timing page's two dots
    on the console, and the chip gives them under alignment 0. Under alignments 1 to 3 the chip
    suppresses on one dot, derived as item 1's columns are.
-3. **The chip while rendering.** The "PPU registers" page states behaviors the register file does
-   not carry: a rendering toggle reaching the picture three or four dots after the write, the
-   second `$2006` write reaching `v` one to one and a half dots on (loaded at the write here), the
-   OAM address forced to 0 during sprite evaluation and its glitchy increment, the evaluation
-   exposed through `$2004`, the `$2000` bit 0 race at dot 257, the `$2006` bus conflict, and the
-   palette corruption; the "DMA" page adds the DPCM read conflict with `$2007`. Each is stated by
-   its page and belongs to the picture or the DMC.
+3. **The chip while rendering.** The "PPU registers" page states behaviors the chip does not
+   carry: a rendering toggle reaching the picture three or four dots after the write, where the
+   picture here reads `$2001` on the first dot after it, the second `$2006` write reaching `v` one
+   to one and a half dots on (loaded at the write here), the OAM address forced to 0 during sprite
+   evaluation and its glitchy increment, the evaluation exposed through `$2004`, the `$2000` bit 0
+   race at dot 257, the `$2006` bus conflict, and the palette corruption; the "DMA" page adds the
+   DPCM read conflict with `$2007`. Each is stated by its page and belongs to the tiles, the
+   sprites or the DMC.
 4. **The 2C02G's OAM corruption on `$2003` writes.** The "PPU registers" page's OAMADDR note and
    the "Errata" page's sprite entries have a write to `$2003` copy one eight-byte row of OAM over
    another on some CPU-PPU alignments, without stating which bytes on which alignment;
@@ -846,8 +953,14 @@ by the documents the chip is built from.
 11. **The dot a `$2001` write reaches the frame counter on.** `10-even_odd_timing` places it to
     one PPU clock and passes on this chip under alignment 0 with the third dot after the access;
     the "PPU registers" page gives approximately 3-4 dots after the write. The count is the same
-    under the other alignments, which the program is not run under, and whether the picture's
-    readers of the rendering bits lag by it belongs to item 3.
+    under the other alignments, which the program is not run under. The picture reads the
+    register on the first dot after the write, item 3's.
+12. **The dot the output appears on.** The "PPU rendering" page has the first pixel output during
+    cycle 4 and its frame timing diagram a 4-dot delay from the dot the chip decides a pixel on,
+    which the chip follows: position `x` on dot `x + 4`. The "NTSC video" page's scanline table
+    has the active picture from position 1 of 341, one pixel clock behind the counter. A reading
+    of the chip's video output against its counter on Visual 2C02 would settle the two against
+    each other.
 
 ## See also
 
@@ -864,13 +977,17 @@ by the documents the chip is built from.
 - `tests/ppu/registers_test.cpp` — the hand-derived suite.
 - `tests/ppu/programs_test.cpp` — the register file's test programs, a sprite's byte 2 and the
   dot a `$2001` write reaches the skip on.
+- `include/neasant/nes/video_frame.h` — the picture's size, a dot's layout, `VideoFrame` and
+  `FrameObserver`.
+- `tests/ppu/picture_test.cpp` — the picture on the bare chip and through the machine's frame
+  observer.
 
 ## Sources
 
 - **NESdev wiki** — the pages "PPU registers", "PPU scrolling", "PPU memory map", "PPU palettes",
-  "PPU OAM", "PPU frame timing", "PPU power up state", "NMI", "Open bus behavior", "Cartridge
-  connector", "CPU pinout", "CPU interrupts", "DMA" and "Errata", at
-  `https://www.nesdev.org/wiki/`.
+  "PPU OAM", "PPU rendering" with its frame timing diagram, "NTSC video", "PPU frame timing",
+  "PPU power up state", "NMI", "Open bus behavior", "Cartridge connector", "CPU pinout", "CPU
+  interrupts", "DMA" and "Errata", at `https://www.nesdev.org/wiki/`.
 - **The test programs** — blargg's `ppu_vbl_nmi`, `vbl_nmi_timing`,
   `blargg_ppu_tests_2005.09.15b`, `ppu_open_bus`, `oam_read` and `oam_stress`, with their readmes
   and sources, as the `christopherpow/nes-test-roms` repository at
