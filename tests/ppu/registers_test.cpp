@@ -938,13 +938,17 @@ TEST(PpuPowerOn, ResetResetsThePpuWithTheCpu) {
   // scanline 109 sixteen steps of coarse X, from the 18 that `t`'s 16 and dots 328 and
   // 336 leave, take it past 31 into the nametable beside, to 2.
   EXPECT_EQ(m.state().ppu.v, 0x3122);
+  // The evaluation moved the OAM address too: dots 257-320 of scanline 108 held it at 0,
+  // and on scanline 109 the thirty-three sprites looked at by dot 131, none in range,
+  // moved it four bytes each.
+  EXPECT_EQ(m.state().ppu.oamAddr, 0x84);
   const std::uint64_t before = m.state().master;
   m.reset();
   const PpuState& p = m.state().ppu;
   EXPECT_EQ(p.ctrl, 0);
   EXPECT_EQ(p.mask, 0);
   EXPECT_TRUE(p.vblank);
-  EXPECT_EQ(p.oamAddr, 0x12);
+  EXPECT_EQ(p.oamAddr, 0x84);
   EXPECT_EQ(p.v, 0x3122);
   EXPECT_EQ(p.t, 0);
   EXPECT_EQ(p.x, 0);

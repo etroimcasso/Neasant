@@ -1064,14 +1064,43 @@ TEST(SprdmaAndDmcDma, SprdmaAndDmcDma512) {
   expectPass("sprdma_and_dmc_dma/sprdma_and_dmc_dma_512.nes", Report::Screen);
 }
 
-// Its NMI handler turns rendering on and waits for the sprite 0 hit before it starts the
-// sample and counts the interrupts (its README.txt and reset.s).
+// Its NMI handler turns rendering on, waits for the sprite 0 hit at the top of the
+// picture, measures one sample's playback and then times the frame by the DMC's
+// interrupt, its handler restarting a one-byte sample at rate 15 each time until its
+// sixteenth interrupt and a seventeen-byte one after, enabling the background at the
+// eighth and disabling it at the nineteenth (its README.txt and reset.s). Each frame the
+// machine takes twenty interrupt sequences: the measured playback's and nineteen of the
+// chain, seventeen one-byte playbacks of 432 CPU cycles and two seventeen-byte ones of
+// 7344, the twentieth falling after the NMI that stops the sample; under both APU halves,
+// from the program's fourth frame.
 TEST(Dpcmletterbox, Dpcmletterbox) {
   std::optional<Bytes> image;
   loadDmcProgramOrSkip("dpcmletterbox/dpcmletterbox.nes", image);
   if (!image) return;
-  GTEST_SKIP() << "dpcmletterbox/dpcmletterbox.nes needs the sprite 0 hit its NMI handler "
-                  "waits for, which is not built";
+  struct Sequences final : BusObserver {
+    int irqs = 0;
+    int nmis = 0;
+    void access(const BusAccess& access) override {
+      if (access.kind != VectorRead) return;
+      if (access.address == 0xFFFE) ++irqs;
+      if (access.address == 0xFFFA) ++nmis;
+    }
+  };
+  constexpr std::uint64_t kFrameCycles = 357368;
+  for (const std::uint8_t half : {kGet, kPut}) {
+    Nes machine = machineOver(*image, half);
+    Sequences sequences;
+    machine.setObserver(&sequences);
+    machine.run(3 * kFrameCycles);
+    for (int frame = 3; frame < 12; ++frame) {
+      sequences.irqs = 0;
+      sequences.nmis = 0;
+      machine.run(kFrameCycles);
+      EXPECT_EQ(sequences.irqs, 20) << "half " << int{half} << ", frame " << frame;
+      EXPECT_EQ(sequences.nmis, 1) << "half " << int{half} << ", frame " << frame;
+    }
+    machine.setObserver(nullptr);
+  }
 }
 
 // The four of dmc_tests carry no text, readme or source.

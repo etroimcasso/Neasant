@@ -6,15 +6,17 @@ value and side effect of every read, the I/O bus behind them and its decay, the 
 ports fill, the port at `$2007` over the chip's own 14-bit address space, the frame counter that
 runs 341 dots by 262 scanlines, the vertical-blank flag and the NMI output it drives, the warm-up
 window after power-on and reset, the memories the console and the chip hold, nametable RAM, palette
-RAM and object attribute memory, the background, fetched through the board and scrolled by `v`, and
-the picture, 256 dots by 240 lines, each resolved on its dot.
+RAM and object attribute memory, the background, fetched through the board and scrolled by `v`, the
+sprites, found in OAM a line ahead and fetched through the board, and the picture, 256 dots by 240
+lines, each resolved on its dot.
 
 The register file is what a program reads and writes, and the frame counter is what its timing
-stands on. With rendering enabled the chip fetches the background a tile every eight dots, shifts it
-out a pixel a dot and draws it over the backdrop; with rendering disabled every position is the
-backdrop, or the palette entry `v` points at; either way under greyscale and emphasis. No sprite is
-evaluated or drawn. The chip's state is one value inside [the machine's](nes-machine.md),
-`state().ppu`, and the machine runs its dots and hands the picture to [its frame
+stands on. With rendering enabled the chip fetches the background a tile every eight dots, finds the
+next line's sprites in OAM as it goes, and draws both over the backdrop through the priority
+multiplexer, setting sprite 0 hit and the overflow flag beside; with rendering disabled every
+position is the backdrop, or the palette entry `v` points at; either way under greyscale and
+emphasis. The chip's state is one value inside [the machine's](nes-machine.md), `state().ppu`, and
+the machine runs its dots and hands the picture to [its frame
 observer](nes-machine.md#the-frame-observer).
 
 The status table in the [README](../README.md) is the component's status row.
@@ -42,6 +44,11 @@ The status table in the [README](../README.md) is the component's status row.
   - [A line's dots](#a-lines-dots)
   - [The scroll while rendering](#the-scroll-while-rendering)
   - [The shift registers and the pixel](#the-shift-registers-and-the-pixel)
+- [The sprites](#the-sprites)
+  - [A sprite's four bytes](#a-sprites-four-bytes)
+  - [The evaluation](#the-evaluation)
+  - [The output units](#the-output-units)
+  - [The sprites' pixel and the multiplexer](#the-sprites-pixel-and-the-multiplexer)
 - [The picture](#the-picture)
   - [What a dot holds](#what-a-dot-holds)
 - [The NMI output](#the-nmi-output)
@@ -62,19 +69,21 @@ The status table in the [README](../README.md) is the component's status row.
 The chip's state is one value, `PpuState`, held inside the machine's state as `NesState::ppu`; a
 snapshot of the machine carries it whole and a restore puts it back. The chip's behavior is six
 functions over that state: `ppuWrite` and `ppuRead` for a CPU access to a port, `ppuPeekRegister`
-for a read's value without its effect, `ppuTickDot` for one dot, the background's work and the
-picture's position with it, `ppuReset` for the reset line, and `ppuNmiAsserted` for the NMI output.
-The machine calls them as its cycles run, and a host that runs the machine never needs to.
+for a read's value without its effect, `ppuTickDot` for one dot, the background's and the sprites'
+work and the picture's position with it, `ppuReset` for the reset line, and `ppuNmiAsserted` for the
+NMI output. The machine calls them as its cycles run, and a host that runs the machine never needs
+to.
 
 ```cpp
 // The chip after the reset line: $2000, $2001 with any write of it still short of the
 // frame counter, the temporary address, the fine X scroll, the write toggle and the read
 // buffer cleared, the counter at dot 0 of scanline 0 of an even frame, and the warm-up
-// window open; the vertical-blank flag, the OAM address, the current address, the I/O bus
-// with its decay, the fetch latches, the shift registers, the pixels on their way to the
-// picture, the address lines and every memory keep what they hold (NESdev wiki, "PPU
-// power up state", Initial Register Values, the After Reset column and the note on the
-// internal reset signal).
+// window open; the vertical-blank, sprite 0 hit and sprite overflow flags, the OAM
+// address, the current address, the I/O bus with its decay, the fetch latches, the shift
+// registers, the pixels on their way to the picture, the address lines, secondary OAM
+// with the evaluation's place, the OAM bus, the sprite 0 flags, the output units and
+// every memory keep what they hold (NESdev wiki, "PPU power up state", Initial Register
+// Values, the After Reset column and the note on the internal reset signal).
 void ppuReset(PpuState& state) noexcept;
 
 // A CPU write to port `port`, 0-7, the address's low three bits. Every write loads the
@@ -84,12 +93,13 @@ void ppuReset(PpuState& state) noexcept;
 // steps `v`; a write to $2002 loads the bus and nothing else.
 void ppuWrite(PpuState& state, std::uint8_t port, std::uint8_t value, const PpuInputs& inputs);
 
-// A CPU read of port `port`. $2002 answers the vertical-blank flag in bit 7 over the
-// I/O bus's low five bits, then clears the flag and the write toggle; $2004 answers
-// the OAM byte at the OAM address, a sprite's byte 2 with bits 4-2 clear; $2007 answers
-// the read buffer and refills it from the chip's address space at `v`, or answers a
-// palette entry at once under the bus's top two bits, and steps `v`; every other port
-// answers the I/O bus as it stands.
+// A CPU read of port `port`. $2002 answers the vertical-blank flag in bit 7, the sprite 0
+// hit flag in bit 6 and the sprite overflow flag in bit 5 over the I/O bus's low five
+// bits, then clears the vertical-blank flag and the write toggle; $2004 answers the OAM
+// byte at the OAM address, a sprite's byte 2 with bits 4-2 clear, or the byte on the
+// chip's OAM bus while the chip renders; $2007 answers the read buffer and refills it
+// from the chip's address space at `v`, or answers a palette entry at once under the
+// bus's top two bits, and steps `v`; every other port answers the I/O bus as it stands.
 [[nodiscard]] std::uint8_t ppuRead(PpuState& state, std::uint8_t port, const PpuInputs& inputs);
 
 // What a read of port `port` would answer, with nothing moved: the flag, the toggle,
@@ -99,25 +109,38 @@ void ppuWrite(PpuState& state, std::uint8_t port, std::uint8_t value, const PpuI
 // One dot. Steps the frame counter, going from dot 339 of scanline 261 straight to dot
 // 0 of scanline 0 on an odd frame with rendering enabled; sets the vertical-blank flag
 // at dot 1 of scanline 241 unless a read of $2002 is under way on the CPU's bus, and
-// clears it and closes the warm-up window at dot 1 of scanline 261.
+// clears it, the sprite 0 hit flag and the sprite overflow flag and closes the warm-up
+// window at dot 1 of scanline 261.
 //
 // With rendering enabled, on scanlines 0-239 and 261, runs the background's dot. An
 // access through the board is two dots, the address and then the read. Dots 1-256 and
 // 321-336 fetch a tile every eight: its nametable byte, its attribute byte and its two
 // pattern bytes. Each eight dots from 257 to 320 open with two nametable fetches, the
 // first kept and the second dropped, as dots 337-340 are; the four dots that follow
-// them in each eight make no access. Dot 0 of scanlines 0-240 drives the address of the
-// next pattern fetch and reads nothing, and the dot an odd frame reaches by its skip
-// makes the read dot 340 would have. The shift registers shift on dots 2-257 and
-// 322-337 and reload on every eighth dot from 9 to 257 and on dots 329 and 337. `v`
-// steps its coarse X on every eighth dot from 8 to 256 and on dots 328 and 336, steps
-// its Y on dot 256, takes `t`'s horizontal bits on dot 257 and, on scanline 261, `t`'s
-// vertical bits on each of dots 280-304. A write to $2001 counts for the skip and for
-// all of this from the third dot after its access.
+// them in each eight fetch a sprite's two pattern bytes. Dot 0 of scanlines 0-240
+// drives the address of the next pattern fetch and reads nothing, and the dot an odd
+// frame reaches by its skip makes the read dot 340 would have. The shift registers
+// shift on dots 2-257 and 322-337 and reload on every eighth dot from 9 to 257 and on
+// dots 329 and 337. `v` steps its coarse X on every eighth dot from 8 to 256 and on
+// dots 328 and 336, steps its Y on dot 256, takes `t`'s horizontal bits on dot 257 and,
+// on scanline 261, `t`'s vertical bits on each of dots 280-304. A write to $2001 counts
+// for the skip and for all of this from the third dot after its access.
+//
+// With rendering enabled, on scanlines 0-239, runs the sprites' evaluation beside the
+// background: dots 1-64 clear secondary OAM to $FF, and from dot 65 each odd dot reads
+// OAM at the OAM address and each even dot copies a sprite found in range for the next
+// line into secondary OAM, eight at most, a ninth found setting the overflow flag by
+// the search's own fault. On dots 257-320 of scanlines 0-239 and 261 each eight reads a
+// slot of secondary OAM into an output unit, its attribute on the third dot, its X on
+// the fourth and its two pattern bytes by the fetches, 0 for a slot whose sprite has no
+// row on the line, and holds the OAM address at 0. On each of dots 2-257 of scanlines
+// 0-239 the units count down and shift, the frontmost opaque sprite pixel meets the
+// background's in the priority multiplexer, and sprite 0 hit is set where both are
+// opaque with sprite 0 in the first unit, at every position but 255.
 //
 // Resolves the picture's position for the dot on dots 4-259 of scanlines 0-239, and
 // stores it when `inputs` carries the picture: position x of line y on dot x + 4 of
-// scanline y. With rendering enabled its value is the background's pixel, selected two
+// scanline y. With rendering enabled its value is the multiplexer's pixel, selected two
 // dots earlier, or the backdrop, palette entry 0, where that pixel is transparent; with
 // rendering disabled the backdrop, or the entry the low 14 bits of `v` name while they
 // are in $3F00-$3FFF; each under greyscale and the emphasis bits as $2001 stands on that
@@ -125,10 +148,11 @@ void ppuWrite(PpuState& state, std::uint8_t port, std::uint8_t value, const PpuI
 // dot was (PpuDotEvent).
 //
 // NESdev wiki, "NMI", Operation; "PPU frame timing", Even/Odd Frames and VBL Flag
-// Timing; "PPU power up state"; "PPU registers", PPUMASK; "PPU rendering", Drawing
-// overview, Rendering disabled, Line-by-line timing and PPU address bus contents, and its
-// frame timing diagram with its notes; "PPU scrolling", Register controls and Wrapping
-// around; "PPU palettes", Backdrop override.
+// Timing; "PPU power up state"; "PPU registers", PPUMASK, PPUSTATUS and OAMADDR; "PPU
+// rendering", Drawing overview, Rendering disabled, Line-by-line timing and PPU address
+// bus contents, and its frame timing diagram with its notes; "PPU scrolling", Register
+// controls and Wrapping around; "PPU palettes", Backdrop override; "PPU OAM"; "PPU
+// sprite evaluation"; "PPU sprite priority".
 PpuDotEvent ppuTickDot(PpuState& state, bool statusRead, const PpuInputs& inputs);
 
 // The chip's NMI output, true while it is pulled low: the vertical-blank flag set and
@@ -199,24 +223,43 @@ Every later example on this page uses this `programImage` and needs no further `
 
 ## The state value
 
-`PpuState` is the chip's whole mutable state as a value: snapshot by copy, restore by assignment.
+`PpuState` is the chip's whole mutable state as a value: snapshot by copy, restore by assignment;
+`SpriteUnit` is one of the eight output units it holds.
 
 ```cpp
+// One sprite output unit: the two 8-bit shift registers holding its row, [0] the pixels'
+// low bits and [1] their high bits, with the leftmost pixel at bit 0 and each shift
+// moving every bit a place toward bit 0 with a 0 in at bit 7; its attribute byte, bits
+// 1-0 the palette and bit 5 the priority, behind the background when set; and its X
+// counter, which counts down a picture position at a time and lets the registers shift
+// once it is 0. A unit loaded from a slot that holds no sprite for the line has its
+// registers 0 (NESdev wiki, "PPU rendering", Cycles 257-320; "PPU OAM", Byte 2 -
+// Attributes; Brad Taylor's NTSC 2C02 technical reference, Details of object pattern
+// fetch & render).
+struct SpriteUnit {
+  std::array<std::uint8_t, 2> pattern{};
+  std::uint8_t attribute = 0;
+  std::uint8_t x = 0;
+  [[nodiscard]] bool operator==(const SpriteUnit&) const noexcept = default;
+};
+
+// The chip's whole mutable state as a value: snapshot by copy, restore by assignment.
 struct PpuState {
-  // $2000 as last written: bit 7 enables the NMI output, bit 4 selects the half of the
-  // pattern table the background's tiles are read from, $0000 or $1000, bit 2 selects
-  // the step the address takes after a $2007 access, 1 or 32, and bits 1-0 are copied
-  // into the temporary address as the nametable select (NESdev wiki, "PPU registers",
-  // PPUCTRL; "PPU pattern tables", Addressing; "PPU scrolling", $2000 write). Bits 6, 5
-  // and 3 are held for the sprites and the EXT pins.
+  // $2000 as last written: bit 7 enables the NMI output, bit 5 makes every sprite 8x16,
+  // bit 4 selects the half of the pattern table the background's tiles are read from,
+  // $0000 or $1000, bit 3 the half 8x8 sprites are read from, bit 2 selects the step
+  // the address takes after a $2007 access, 1 or 32, and bits 1-0 are copied into the
+  // temporary address as the nametable select (NESdev wiki, "PPU registers", PPUCTRL;
+  // "PPU pattern tables", Addressing; "PPU OAM", Byte 1 - Tile/index; "PPU scrolling",
+  // $2000 write). Bit 6 is held for the EXT pins and drives nothing.
   std::uint8_t ctrl = 0;
   // $2001 as last written: bits 4 and 3 enable rendering, which runs the fetches, the
-  // shift registers, `v`'s moves and the odd-frame skip, and decides whether a position
-  // of the picture is the background's or `v` names its entry; bit 3 shows the
-  // background, and bit 1 shows it in the picture's eight leftmost positions; bit 0 is
-  // greyscale, which a palette read and the picture apply; and bits 7-5 are the emphasis
-  // bits every dot of the picture carries (NESdev wiki, "PPU registers", PPUMASK). Bit 2
-  // is held for the sprites.
+  // shift registers, `v`'s moves, the sprites' evaluation and units and the odd-frame
+  // skip, and decides whether a position of the picture is the multiplexer's or `v`
+  // names its entry; bit 4 shows the sprites and bit 3 the background, and bits 2 and 1
+  // show each in the picture's eight leftmost positions; bit 0 is greyscale, which a
+  // palette read and the picture apply; and bits 7-5 are the emphasis bits every dot of
+  // the picture carries (NESdev wiki, "PPU registers", PPUMASK).
   std::uint8_t mask = 0;
   // A write to $2001 reaches the frame counter on the third dot after its access.
   // `maskLag` counts the dots still to pass, and while it is not zero the odd-frame
@@ -231,8 +274,18 @@ struct PpuState {
   // dot 1 of scanline 261 and by a read of $2002 (NESdev wiki, "NMI", Operation). At
   // power-on it is what the config says.
   bool vblank = false;
-  // $2003 as last written, stepped by every write to $2004 (NESdev wiki, "PPU
-  // registers", OAMADDR and OAMDATA).
+  // The sprite 0 hit flag, bit 6 of $2002: set on the dot the chip selects a picture
+  // position where sprite 0's pixel and the background's are both opaque. The sprite
+  // overflow flag, bit 5: set when a line's evaluation finds a ninth sprite in range, by
+  // its own faulty search. Both clear at dot 1 of scanline 261 and at no other time; a
+  // read of $2002 answers them and leaves them (NESdev wiki, "PPU registers",
+  // PPUSTATUS; "PPU OAM", Sprite 0 hits; "PPU sprite evaluation", Sprite overflow bug).
+  bool sprite0Hit = false;
+  bool spriteOverflow = false;
+  // $2003 as last written, stepped by every write to $2004. While the chip renders it is
+  // the evaluation's pointer into OAM, stepped as the evaluation reads, and it is held
+  // at 0 on each of dots 257-320 of scanlines 0-239 and 261 (NESdev wiki, "PPU
+  // registers", OAMADDR with its Values during rendering, and OAMDATA).
   std::uint8_t oamAddr = 0;
   // The scroll file (NESdev wiki, "PPU scrolling", PPU internal registers): the current
   // address `v` and the temporary address `t`, 15 bits each, the fine X scroll `x`,
@@ -310,13 +363,13 @@ struct PpuState {
   std::array<std::uint16_t, 2> patternShift{};
   std::array<std::uint8_t, 2> attributeShift{};
   std::uint8_t attributeFeed = 0;
-  // The background's pixels on their way to the picture: [0] the one selected on the
-  // last dot and [1] the one selected on the dot before it. A pixel is a palette
-  // address: 0 when it is transparent, and otherwise the tile's palette in bits 3-2 over
-  // the pattern's two bits. A position's pixel is selected two dots behind the counter
-  // and reaches the picture four behind it (NESdev wiki, "PPU rendering", Cycles 1-256:
-  // the shifters first shift on cycle 2, where sprite 0 hit takes the image to start,
-  // and the first pixel is output during cycle 4).
+  // The pixels on their way to the picture: [0] the one selected on the last dot and [1]
+  // the one selected on the dot before it. A pixel is a palette address: 0 when it is
+  // transparent, and otherwise the pattern's two bits under the palette's two, with bit 4
+  // set for a sprite's. A position's pixel is selected two dots behind the counter and
+  // reaches the picture four behind it (NESdev wiki, "PPU rendering", Cycles 1-256: the
+  // shifters first shift on cycle 2, where sprite 0 hit takes the image to start, and
+  // the first pixel is output during cycle 4).
   std::array<std::uint8_t, 2> pixelPipeline{};
   // The address lines as the fetch circuit last drove them, and the console's address
   // latch. On the first dot of an access the chip drives all fourteen lines and the
@@ -327,6 +380,34 @@ struct PpuState {
   // Signal descriptions).
   std::uint16_t addressPins = 0;
   std::uint8_t addressLatch = 0;
+  // Secondary OAM, the 32 bytes a line's evaluation fills with the next line's sprites,
+  // four bytes each in OAM's order, cleared to $FF on dots 1-64 and read into the output
+  // units on dots 257-320. `secondaryAddress` is the byte the next copied byte goes to,
+  // 32 once eight sprites are found and the writes stop (NESdev wiki, "PPU OAM",
+  // Internal operation; "PPU sprite evaluation", Details).
+  std::array<std::uint8_t, 32> secondaryOam{};
+  std::uint8_t secondaryAddress = 0;
+  // The byte on the chip's OAM bus: what its last access to OAM or secondary OAM read,
+  // and what a read of $2004 answers while the chip renders (NESdev wiki, "PPU
+  // registers", OAMDATA; "PPU sprite evaluation", Details).
+  std::uint8_t oamBus = 0;
+  // Where a line's evaluation stands: the bytes of a sprite still to be read after its Y
+  // was found in range, 3 to 0, and whether every sprite has been looked at, after which
+  // the evaluation reads a Y every other dot and copies nothing (NESdev wiki, "PPU
+  // sprite evaluation", Details).
+  std::uint8_t copyLeft = 0;
+  bool evaluationDone = false;
+  // The chip's two sprite 0 flags: whether the first sprite a line's evaluation looked
+  // at, sprite 0 while the OAM address is 0, was found in range for the next line, and
+  // whether it was for the line being drawn, which dot 257 copies from the first and
+  // the hit consults (NESdev wiki, "PPU OAM", Internal operation; "PPU registers",
+  // OAMADDR, Values during rendering).
+  bool sprite0Next = false;
+  bool sprite0Current = false;
+  // The eight sprite output units, unit 0 the frontmost, each loaded on dots 257-320
+  // from its slot of secondary OAM for the next line (NESdev wiki, "PPU OAM", Internal
+  // operation; "PPU sprite priority", Detailed internals of the sprite priority quirk).
+  std::array<SpriteUnit, 8> spriteUnits{};
   [[nodiscard]] bool operator==(const PpuState&) const noexcept = default;
 };
 ```
@@ -342,10 +423,11 @@ inline constexpr std::uint16_t kScanlinesPerFrame = 262;
 `ctrl` and `mask` are `$2000` and `$2001` as last written, and `maskBefore` and `maskLag` carry a
 `$2001` write to the frame counter; `v`, `t`, `x` and `w` are the scroll file the "PPU scrolling"
 page names; the I/O bus and its eight decay counts, the warm-up window, the counter's dot, scanline
-and parity, and the three memories follow; and the fetch latches, the shift registers, the two
-pixels on their way to the picture and the address lines with the console's latch are [the
-background's](#the-background). Every field is plain, so a snapshot taken on any dot of any line
-restores to the same place.
+and parity, and the three memories follow; the fetch latches, the shift registers, the two pixels on
+their way to the picture and the address lines with the console's latch are [the
+background's](#the-background); and secondary OAM with the evaluation's place, the OAM bus, the two
+sprite 0 marks and the output units are [the sprites'](#the-sprites). Every field is plain, so a
+snapshot taken on any dot of any line restores to the same place.
 
 ## The ports
 
@@ -356,9 +438,9 @@ bits. Every write loads the I/O bus whole, and every read of a write-only port a
 |---|---|---|---|
 | `$2000` | `ctrl`, and bits 1–0 into bits 11–10 of `t`; ignored in the warm-up | the bus | none |
 | `$2001` | `mask`, which the frame counter reads from the write's third dot; ignored in the warm-up | the bus | none |
-| `$2002` | the bus and nothing more | the vertical-blank flag in bit 7 over the bus's low five bits | the flag and the toggle cleared; bits 7–5 of the bus driven |
+| `$2002` | the bus and nothing more | the vertical-blank flag in bit 7, the sprite 0 hit flag in bit 6 and the sprite overflow flag in bit 5 over the bus's low five bits | the vertical-blank flag and the toggle cleared; bits 7–5 of the bus driven |
 | `$2003` | the OAM address | the bus | none |
-| `$2004` | the OAM byte at the address, which then steps | the OAM byte at the address, a sprite's byte 2 with bits 4–2 clear | the bus driven whole; the address unmoved |
+| `$2004` | the OAM byte at the address, which then steps | the OAM byte at the address, a sprite's byte 2 with bits 4–2 clear, or the byte on the chip's OAM bus while it renders | the bus driven whole; the address unmoved |
 | `$2005` | the first write coarse X into `t` and fine X into `x`, the second fine Y and coarse Y into `t`; the toggle flips; ignored in the warm-up | the bus | none |
 | `$2006` | the first write bits 13–8 of `t` with bit 14 cleared, the second its low byte and then the whole of `t` into `v`; the toggle flips; ignored in the warm-up | the bus | none |
 | `$2007` | the byte through the chip's address space at `v`, then `v` steps by 1 or 32 | the read buffer, or a palette entry at once under the bus's top two bits | the buffer refilled from `v`; the bus driven; `v` steps |
@@ -397,16 +479,17 @@ under [The I/O bus](#the-io-bus), [Its decay](#its-decay) and [The palette](#the
 
 ### $2000 and $2001
 
-Bit 7 of `$2000` enables the NMI output, bit 4 selects the half of the pattern table the
-background's tiles are read from, `$0000` or `$1000`, bit 2 selects the step `v` takes after a
-`$2007` access, 1 or 32, and bits 1–0 are copied into the temporary address as the nametable select;
-bits 6, 5 and 3 are held for the sprites and the EXT pins. `$2001` bits 4 and 3 enable rendering,
-which runs the fetches, the shift registers, `v`'s moves and the odd-frame skip, and decides whether
-a position of the picture is the background's or `v` names its entry; bit 3 shows the background,
-and bit 1 shows it in the picture's eight leftmost positions; bit 0 is greyscale, which a palette
-read and the picture apply; bits 7–5 are the emphasis bits every dot of the picture carries; and bit
-2 is held for the sprites (NESdev wiki, "PPU registers", PPUCTRL and PPUMASK; "PPU pattern tables",
-Addressing; "PPU scrolling", $2000 write).
+Bit 7 of `$2000` enables the NMI output, bit 5 makes every sprite 8x16, bit 4 selects the half of
+the pattern table the background's tiles are read from, `$0000` or `$1000`, bit 3 the half 8x8
+sprites are read from, bit 2 selects the step `v` takes after a `$2007` access, 1 or 32, and bits
+1–0 are copied into the temporary address as the nametable select; bit 6 is held for the EXT pins
+and drives nothing. `$2001` bits 4 and 3 enable rendering, which runs the fetches, the shift
+registers, `v`'s moves, the sprites' evaluation and units and the odd-frame skip, and decides
+whether a position of the picture is the multiplexer's or `v` names its entry; bit 4 shows the
+sprites and bit 3 the background, and bits 2 and 1 show each in the picture's eight leftmost
+positions; bit 0 is greyscale, which a palette read and the picture apply; and bits 7–5 are the
+emphasis bits every dot of the picture carries (NESdev wiki, "PPU registers", PPUCTRL and PPUMASK;
+"PPU pattern tables", Addressing; "PPU OAM", Byte 1 - Tile/index; "PPU scrolling", $2000 write).
 
 ```cpp
 neasant::ppuWrite(chip, 0, 0x83, inputs);
@@ -415,15 +498,17 @@ neasant::ppuWrite(chip, 0, 0x83, inputs);
 // neasant::ppuNmiAsserted(chip) == false: bit 7 is set but the vertical-blank flag is clear
 neasant::ppuWrite(chip, 1, 0x1E, inputs);
 // chip.mask == 0x1E: rendering is enabled, so the chip fetches and draws the background
-//                    and an odd frame skips its last dot
+//                    and the sprites, and an odd frame skips its last dot
 ```
 
 ### $2002
 
-A read answers the vertical-blank flag in bit 7 over the I/O bus's low five bits, then clears the
-flag and the write toggle, and drives bits 7–5 of the bus with what it answered. A write to
-`$2002` loads the bus and nothing else (NESdev wiki, "NMI", Operation; "PPU scrolling", $2002
-read; "Open bus behavior", PPU open bus).
+A read answers the vertical-blank flag in bit 7, the sprite 0 hit flag in bit 6 and the sprite
+overflow flag in bit 5 over the I/O bus's low five bits, then clears the vertical-blank flag and the
+write toggle, leaving the two sprite flags ([The sprites](#the-sprites)), and drives bits 7–5 of the
+bus with what it answered. A write to `$2002` loads the bus and nothing else (NESdev wiki, "NMI",
+Operation; "PPU registers", PPUSTATUS; "PPU scrolling", $2002 read; "Open bus behavior", PPU open
+bus).
 
 ```cpp
 chip.vblank = true;
@@ -439,7 +524,10 @@ const std::uint8_t status = neasant::ppuRead(chip, 2, inputs);
 ### $2003 and $2004
 
 `$2003` sets the OAM address. A write to `$2004` lands at it and steps it; a read answers the byte
-there and does not step it (NESdev wiki, "PPU registers", OAMADDR and OAMDATA).
+there and does not step it. While the chip renders, on scanlines 0–239 and 261 with rendering
+enabled, a read answers the byte on the chip's OAM bus instead, what its own access to OAM or
+secondary OAM last read, and the OAM address is the evaluation's pointer, held at 0 on dots 257–320,
+as [the evaluation](#the-evaluation) describes (NESdev wiki, "PPU registers", OAMADDR and OAMDATA).
 
 ```cpp
 neasant::ppuWrite(chip, 3, 0x10, inputs);
@@ -765,18 +853,18 @@ A line's accesses run in eights from dot 1:
 |---|---|---|---|
 | 0 | the address of the next low pattern byte, and no read | | |
 | 1–256 | 32 tiles | coarse X steps on every eighth dot, 8 to 256; Y steps on dot 256 | shift on dots 2–257; reload on dot 9 and every eighth dot to 257 |
-| 257–320 | in each eight, two nametable fetches, the first kept and the second dropped, then four dots with no access | `t`'s horizontal bits on dot 257; on scanline 261, `t`'s vertical bits on each of dots 280–304 | |
+| 257–320 | in each eight, two nametable fetches, the first kept and the second dropped, then a sprite's two pattern fetches | `t`'s horizontal bits on dot 257; on scanline 261, `t`'s vertical bits on each of dots 280–304 | |
 | 321–336 | the next line's first two tiles | coarse X steps on dots 328 and 336 | shift on dots 322–337; reload on dots 329 and 337 |
 | 337–340 | two nametable fetches, the first kept and the second dropped | | |
 
-The 32 tiles of dots 1–256 are the line's third to its thirty-fourth: the first two were fetched
-on dots 321–336 of the line before, and the thirty-fourth is fetched and never drawn. The
-nametable fetches of dots 257–320 and 337–340 read the tile `v` points at; the first one after
-dot 256 drives its low eight lines as `v` stood when dot 257 began and its high six as that
-dot's copy from `t` leaves them. The move `v` makes on a dot falls after the latch has captured
-an address's low eight and before the high six lines and a read are taken. The four dots that
-follow each pair on dots 257–320 are the sprites' pattern fetches, which the chip does not make:
-the lines keep the address the pair left.
+The 32 tiles of dots 1–256 are the line's third to its thirty-fourth: the first two were fetched on
+dots 321–336 of the line before, and the thirty-fourth is fetched and never drawn. The nametable
+fetches of dots 257–320 and 337–340 read the tile `v` points at; the first one after dot 256 drives
+its low eight lines as `v` stood when dot 257 began and its high six as that dot's copy from `t`
+leaves them. The move `v` makes on a dot falls after the latch has captured an address's low eight
+and before the high six lines and a read are taken. The four dots that follow each pair on dots
+257–320 fetch the two pattern bytes of the sprite in the eight's slot of secondary OAM ([The output
+units](#the-output-units)).
 
 Dot 0 drives an address on scanlines 0–240: the low pattern byte's, for the tile the last kept
 nametable byte names. On an odd frame the counter goes from dot 339 of scanline 261 to dot 0 of
@@ -825,12 +913,13 @@ beside it; each takes at bit 7 its bit of `attributeFeed`, the two 1-bit latches
 from `attributeLatch`. So the low eight bits hold the tile being drawn and the high eight the
 tile after it.
 
-On each of dots 2–257 of a line of the picture the chip selects a pixel and then shifts: the
-fine X scroll picks bit `x` of each register, the pattern's two bits under the palette's two.
-The four bits are an address into palette RAM, and a pattern of 0 is transparent whatever its
-palette. Every pixel is transparent while `$2001` bit 3 is clear, and the eight leftmost while
-bit 1 is. The pixel selected on dot `x + 2` is position `x`'s; it waits in `pixelPipeline` and
-reaches [the picture](#the-picture) on dot `x + 4` (NESdev wiki, "PPU rendering", Picture region
+On each of dots 2–257 of a line of the picture the chip selects the background's pixel and then
+shifts: the fine X scroll picks bit `x` of each register, the pattern's two bits under the palette's
+two. The four bits are an address into palette RAM, and a pattern of 0 is transparent whatever its
+palette. Every pixel is transparent while `$2001` bit 3 is clear, and the eight leftmost while bit 1
+is. The pixel selected on dot `x + 2`, the background's or a sprite's through [the
+multiplexer](#the-sprites-pixel-and-the-multiplexer), is position `x`'s; it waits in `pixelPipeline`
+and reaches [the picture](#the-picture) on dot `x + 4` (NESdev wiki, "PPU rendering", Picture region
 and its notes, and Cycles 1-256; "PPU registers", PPUMASK, Rendering control).
 
 ```cpp
@@ -854,19 +943,220 @@ neasant::ppuTickDot(drawn, false, held); // dot 5
 // picture[10 * 256 + 1] == 0x0F: a transparent pixel shows the backdrop
 ```
 
+## The sprites
+
+With rendering enabled the chip draws up to 64 sprites from object attribute memory, each a tile
+eight dots wide and eight or sixteen lines tall, over or under the background. A line shows at
+most eight of them: while the chip draws a line it reads through OAM for the sprites that have a
+row on the next line, copies the first eight it finds into secondary OAM, fetches their rows
+through the board after the line's last tile, and loads eight output units that shift the rows
+out as the next line is drawn. The evaluation runs on scanlines 0–239, the loading on scanlines
+0–239 and 261, and every part of it only while rendering is enabled (NESdev wiki, "PPU OAM",
+Internal operation; "PPU sprite evaluation"; "PPU rendering", Line-by-line timing).
+
+### A sprite's four bytes
+
+| Byte | Holds |
+|---|---|
+| 0 | Y: the line above the sprite's first row, so a sprite at Y shows from line Y + 1; $EF–$FF keep it off the picture |
+| 1 | the tile: for an 8x8 sprite its number in the half of the pattern table `$2000` bit 3 selects; for an 8x16 sprite bit 0 selects the half, `$0000` or `$1000`, and the even number above it names the top tile, the one after it the bottom |
+| 2 | the attributes: bits 1–0 the palette, 4 to 7; bit 5 the priority, 0 in front of the background and 1 behind it; bit 6 a horizontal flip; bit 7 a vertical flip. Bits 4–2 are not in the chip and read as 0 |
+| 3 | X: the position of the sprite's left column |
+
+(NESdev wiki, "PPU OAM", OAM (Sprite) Data; "PPU registers", PPUCTRL.) A vertical flip of an
+8x16 sprite flips each tile and swaps the two. Nothing of a sprite at X = $F9–$FF past position
+255 shows, and a sprite cannot be partly off the left edge: `$2001` bit 2 hides the eight
+leftmost positions instead.
+
+### The evaluation
+
+On scanlines 0–239 the chip evaluates OAM for the next line while it draws this one, reading
+OAM on the odd dots of 65–256 and acting on the even dots. Its pointer is the OAM address,
+`oamAddr`, which the dots 257–320 before it have held at 0 unless the program has written
+`$2003` since:
+
+| Dots | What the chip does |
+|---|---|
+| 1–64 | clears secondary OAM: each odd dot reads $FF onto the OAM bus and each even dot writes it to the next byte; dot 1 clears the mark that says sprite 0 is on the next line |
+| 65 | begins the evaluation at the first free byte of secondary OAM; the chip being a 2C02G, if the OAM address is 8 or more the eight-byte row of OAM it is in is copied over OAM's first eight bytes |
+| 65, 67, …, 255 | read the byte at the OAM address onto the OAM bus, a byte 2 as its five bits |
+| 66, 68, …, 256 | act on the byte read: a Y goes to the free byte of secondary OAM, and in range, the line less Y a row of the sprite, its sprite's three other bytes follow it on the next three pairs of dots and the free byte moves on; out of range, the pointer moves to the next sprite. The first sprite looked at, in range, marks sprite 0 for the next line |
+| after the eighth sprite found | the writes stop: a Y in range sets the overflow flag and three more bytes are read; a Y out of range moves the pointer to the next sprite and to the next byte at once, so the search reads the sprites' bytes diagonally, byte 1 of the next, byte 2 of the one after, round the four |
+| after sprite 63, or after the ninth sprite's three bytes | the evaluation is done: each remaining pair reads a Y and moves the pointer a sprite, copying nothing |
+
+The free byte after the last sprite copied holds the last Y the search read, sprite 63's, and
+the bytes after it the clear's $FF. The comparison is against the line's number, so a sprite
+below the line is never in range, nor one at Y = $FF, and a sprite's height is 8 or 16 rows as
+`$2000` bit 5 stands on the dot of the comparison. The flag the ninth sprite sets, bit 5 of
+`$2002`, stands until dot 1 of scanline 261 (NESdev wiki, "PPU sprite evaluation", Details, its
+numbered steps, Sprite overflow bug and Notes; "PPU OAM", Byte 0 - Y position and Internal
+operation; "PPU registers", OAMADDR, Values during rendering and OAMADDR precautions, and
+PPUSTATUS, Sprite overflow flag; Brad Taylor's NTSC 2C02 technical reference, In-range object
+evaluation).
+
+```cpp
+std::vector<std::uint8_t> image = programImage({});
+neasant::Cartridge cartridge = neasant::makeCartridge(image);
+neasant::Board board = neasant::boardFor(cartridge);
+std::vector<std::uint8_t> chrRam(cartridge.chrRamBytes);
+const neasant::PpuInputs inputs{board, cartridge, chrRam, 115200u}; // no picture held
+
+neasant::PpuState chip;
+chip.warmingUp = false;
+chip.mask = 0x1E; // the background and the sprites shown, their left columns too
+chip.oam.fill(0xF8); // every sprite below the picture
+chip.oam[12] = 10; // sprite 3: Y 10, in range on scanline 10
+chip.oam[13] = 0x4E; // its tile
+chip.oam[14] = 0xFF; // its attributes, five bits in the chip
+chip.oam[15] = 0x42; // its X
+chip.oam[20] = 5; // sprite 5: Y 5, its other bytes $F8
+chip.scanline = 10; // the counter at dot 0 of a line of the picture
+for (int dot = 1; dot <= 64; ++dot) neasant::ppuTickDot(chip, false, inputs);
+// chip.secondaryOam[0] == 0xFF and chip.oamBus == 0xFF: the clear
+for (int dot = 65; dot <= 256; ++dot) neasant::ppuTickDot(chip, false, inputs);
+// chip.secondaryOam[0] == 10, [1] == 0x4E, [2] == 0xE3 and [3] == 0x42: sprite 3, its byte 2 as
+//                                                                      five bits
+// chip.secondaryOam[4] == 5, [5] == 0xF8, [6] == 0xE0 and [7] == 0xF8: sprite 5
+// chip.secondaryOam[8] == 0xF8 and chip.secondaryOam[9] == 0xFF: the last Y looked at, sprite
+//                                                                63's, then the clear's byte
+// chip.secondaryAddress == 8 and chip.evaluationDone == true
+// chip.sprite0Next == false: sprite 0 is not on the next line
+// chip.oamAddr == 104: the search passed sprite 63 on dot 204 and moved on a sprite every
+//                      pair of dots after, 26 of them
+for (int dot = 257; dot <= 340; ++dot) neasant::ppuTickDot(chip, false, inputs);
+// chip.oamAddr == 0: dots 257-320 held it there
+for (std::size_t n = 0; n < 9; ++n) chip.oam[4 * n] = 20; // nine sprites at Y 20
+chip.scanline = 20;
+chip.dot = 0;
+for (int dot = 1; dot <= 129; ++dot) neasant::ppuTickDot(chip, false, inputs);
+// chip.spriteOverflow == false: eight found by dot 128, the ninth's Y read on dot 129
+neasant::ppuTickDot(chip, false, inputs); // dot 130
+// chip.spriteOverflow == true
+```
+
+### The output units
+
+On dots 257–320 of scanlines 0–239 and 261 the chip loads the eight output units, one each
+eight dots, from the slots of secondary OAM in order, and holds the OAM address at 0. In each
+eight the first four dots read the slot's Y, tile, attributes and X onto the OAM bus and the
+last four read its X again; the attributes enter the unit on the third dot and the X its counter
+on the fourth; the fifth to eighth dots are the two pattern fetches, the low byte of the
+sprite's row and then the high, through the board like a background tile's, where the pair of
+nametable fetches that opens the eight stands in for the tile's nametable and attribute fetches
+([A line's dots](#a-lines-dots)).
+
+The row is the line less the sprite's Y: an 8x8 sprite's row of its tile in the half `$2000`
+bit 3 selects, `$1000` with the bit set; an 8x16 sprite's row of its top or bottom tile in the
+half bit 0 of its tile byte selects; from the bottom when the sprite is flipped vertically. A
+byte enters the unit's register with the leftmost pixel at bit 0, which reverses it unless the
+sprite is flipped horizontally. A slot whose Y has no row on the line, the $FF of a slot no
+sprite filled or a sprite found for a line this is not, still has its two addresses driven,
+tile $FF's for the empty slot, and its unit's registers are loaded with 0. On scanline 261 the
+slots are scanline 239's and the line counts as −1, so no slot has a row there and every unit
+is loaded with 0: nothing shows on the first line of the picture (NESdev wiki, "PPU rendering",
+Cycles 257-320 and Pre-render scanline; "PPU sprite evaluation", Details, Cycles 257-320 and
+Notes; "PPU pattern tables", Addressing; "PPU OAM", Byte 1 - Tile/index and Byte 2 -
+Attributes; "PPU registers", OAMADDR, Values during rendering; Brad Taylor's NTSC 2C02
+technical reference, Details of object pattern fetch & render).
+
+```cpp
+cartridge.chrRom[0x04E3] = 0x41; // row 3 of tile $4E, its low byte
+cartridge.chrRom[0x04EB] = 0x16; // and its high byte
+
+neasant::PpuState loader; // on the same `inputs`
+loader.warmingUp = false;
+loader.mask = 0x1E;
+loader.secondaryOam.fill(0xFF); // as the clear leaves the slots
+loader.secondaryOam[0] = 7; // slot 0: Y 7, so its row on scanline 10 is 3
+loader.secondaryOam[1] = 0x4E; // tile $4E
+loader.secondaryOam[2] = 0x03; // palette 3, in front, not flipped
+loader.secondaryOam[3] = 0x42; // X $42
+loader.scanline = 10;
+loader.dot = 256;
+for (int dot = 257; dot <= 260; ++dot) neasant::ppuTickDot(loader, false, inputs);
+// loader.oamAddr == 0: held there through dot 320
+// loader.spriteUnits[0].attribute == 0x03 and loader.spriteUnits[0].x == 0x42
+neasant::ppuTickDot(loader, false, inputs); // dot 261
+// loader.addressPins == 0x04E3: the low byte's address, on all fourteen lines
+for (int dot = 262; dot <= 264; ++dot) neasant::ppuTickDot(loader, false, inputs);
+// loader.spriteUnits[0].pattern[0] == 0x82 and loader.spriteUnits[0].pattern[1] == 0x68: the
+//                                            two bytes reversed, the leftmost pixel at bit 0
+for (int dot = 265; dot <= 272; ++dot) neasant::ppuTickDot(loader, false, inputs);
+// loader.spriteUnits[1].pattern[0] == 0 and loader.spriteUnits[1].x == 0xFF: slot 1 holds no
+//                                                                            sprite
+```
+
+### The sprites' pixel and the multiplexer
+
+On each of dots 2–257 of a line of the picture, as the chip selects the background's pixel for
+the position two dots behind, every unit counts: a unit whose X counter is not 0 counts it down,
+and one whose counter is 0 shifts a pixel out of its registers, the pattern's two bits, eight of
+them and then nothing. The lowest-numbered unit with an opaque pixel is the sprites' pixel for
+the position, whatever its priority bit: a sprite behind the background hides the sprites behind
+it even where the background covers it. The pixel is its palette's two bits over the pattern's
+two, with bit 4 set, an address into the sprite palettes; it is transparent while `$2001` bit 4
+is clear, and in the eight leftmost positions while bit 2 is.
+
+The priority multiplexer then takes one of the two pixels for the position: both transparent
+gives the backdrop, one opaque gives that one, and both opaque gives the sprite's unless its
+priority bit puts it behind, when the background's shows. Where the background's pixel and the
+first unit's are both opaque, with sprite 0 marked as the unit's sprite for the line, the chip
+sets the sprite 0 hit flag, bit 6 of `$2002`, on that dot, two dots before the position reaches
+the picture; never at position 255, and so never in the eight leftmost positions while either
+layer is hidden there, nor while either layer is off, since the hidden layer's pixel is
+transparent. The flag stands until dot 1 of scanline 261, so a frame reports its first hit
+alone (NESdev wiki, "PPU rendering", Picture region and its priority multiplexer decision
+table, and Cycles 1-256, with the frame timing diagram's notes; "PPU sprite priority"; "PPU
+OAM", Sprite 0 hits; "PPU registers", PPUMASK, and PPUSTATUS, Sprite 0 hit flag; Brad Taylor's
+NTSC 2C02 technical reference, Details of object pattern fetch & render and Multiplexer
+operation).
+
+```cpp
+std::vector<std::uint16_t> picture(neasant::kPictureDots, 0xFFFF); // a value no dot takes
+const neasant::PpuInputs held{board, cartridge, chrRam, 115200u, picture};
+
+neasant::PpuState drawn;
+drawn.warmingUp = false;
+drawn.mask = 0x1E;
+drawn.palette[0x00] = 0x0F; // the backdrop
+drawn.palette[0x01] = 0x21; // the first background palette's first colour
+drawn.palette[0x15] = 0x27; // the second sprite palette's first colour
+drawn.patternShift[0] = 0x00FF; // background pixels of 1 at positions 0-7
+drawn.spriteUnits[0] = neasant::SpriteUnit{.pattern = {0x0F, 0x00}, .attribute = 0x20, .x = 2};
+//                     four pixels of 1 at positions 2-5, palette 0, behind the background
+drawn.spriteUnits[1] = neasant::SpriteUnit{.pattern = {0xFF, 0x00}, .attribute = 0x01, .x = 4};
+//                     eight pixels of 1 at positions 4-11, palette 1, in front
+drawn.sprite0Current = true; // sprite 0 is in the first unit
+drawn.scanline = 10;
+drawn.dot = 1;
+neasant::ppuTickDot(drawn, false, held); // dot 2: position 0 selected, the background's
+neasant::ppuTickDot(drawn, false, held); // dot 3: position 1
+// drawn.sprite0Hit == false
+neasant::ppuTickDot(drawn, false, held); // dot 4: position 2, both opaque
+// drawn.sprite0Hit == true: set on the selection's dot
+for (int dot = 5; dot <= 16; ++dot) neasant::ppuTickDot(drawn, false, held);
+// picture[10 * 256 + 0] == 0x21: the background alone
+// picture[10 * 256 + 2] == 0x21: the first unit is behind the background, which shows
+// picture[10 * 256 + 4] == 0x21: the first unit wins among the sprites and hides the second,
+//                                and the background shows over it
+// picture[10 * 256 + 6] == 0x27: the second unit, in front of the background
+// picture[10 * 256 + 8] == 0x27: the second unit over the backdrop
+// picture[10 * 256 + 12] == 0x0F: the backdrop
+```
+
 ## The picture
 
 The chip resolves one position of the picture a dot: position `x` of line `y` on dot `x + 4` of
 scanline `y`, its output running four dots behind its counter, so a line's 256 positions take dots
 4–259 and lines 0–239 are the picture. The border the chip drives around it is not kept. With
-rendering enabled a position is the palette entry the background's pixel addresses, the pixel
-selected two dots earlier, and a transparent pixel addresses the backdrop, palette entry 0. With
-rendering disabled a position is the backdrop, or, while the low 14 bits of `v` are in
-`$3F00`–`$3FFF`, the entry they name through the palette's aliases. The entry is taken under
-greyscale, and `$2001`'s emphasis bits ride above it. The chip reads `v`, the palette and `$2001` on
-the dot it resolves a position, so a write that lands between two dots shows from the next position
-(NESdev wiki, "PPU rendering", Drawing overview, Rendering disabled and Cycles 1-256, and its frame
-timing diagram's notes; "PPU palettes", Backdrop override; "PPU registers", PPUMASK).
+rendering enabled a position is the palette entry the multiplexer's pixel addresses, the
+background's or a sprite's, selected two dots earlier, and a transparent pixel addresses the
+backdrop, palette entry 0. With rendering disabled a position is the backdrop, or, while the low 14
+bits of `v` are in `$3F00`–`$3FFF`, the entry they name through the palette's aliases. The entry is
+taken under greyscale, and `$2001`'s emphasis bits ride above it. The chip reads `v`, the palette
+and `$2001` on the dot it resolves a position, so a write that lands between two dots shows from the
+next position (NESdev wiki, "PPU rendering", Drawing overview, Rendering disabled and Cycles 1-256,
+and its frame timing diagram's notes; "PPU palettes", Backdrop override; "PPU registers", PPUMASK).
 
 The picture's storage is the caller's, `PpuInputs::picture`: `kPictureDots` entries, 256 × 240,
 row-major from the top line. The chip writes entry `y * 256 + x` when the span holds it and
@@ -1097,6 +1387,16 @@ machine is built with that table as `NesConfig::ramSeed`. `vbl_nmi_timing` print
 `FAILED` on the screen and the 2005 tests a result code, `$01` a pass; the others report at
 `$6000`.
 
+blargg's `sprite_hit_tests_2005.10.05`, eleven ROM files, and `sprite_overflow_tests`, five, measure
+sprite 0 hit and the overflow flag on the console: the hit behind the background, with either layer
+off, at each edge and corner of a tile, under each flip, in the hidden left column, at position 255
+and at the bottom of the picture, with 8x16 sprites, and its time to the pixel; the flag's set and
+clear, its indifference to X and to rendering disabled, Y = 239, 240 and 255, 8x16 sprites, the
+diagonal search, its time to a CPU clock or two, and what a chip that predicts it gets wrong. All
+sixteen pass, each printing a result code. Damian Yerrick's `dpcmletterbox`, whose NMI handler waits
+for the hit at the top of each frame, runs with [the APU's
+programs](apu.md#testing-against-the-programs).
+
 ## Gotchas
 
 - **Four ports ignore writes until the first pre-render line.** `$2000`, `$2001`, `$2005` and
@@ -1128,9 +1428,23 @@ machine is built with that table as `NesConfig::ramSeed`. `vbl_nmi_timing` print
 - **A pattern of 0 is transparent whatever its palette.** It shows the backdrop, entry 0, and
   entries `$3F04`, `$3F08` and `$3F0C` are never drawn by the background.
 - **The background hidden still fetches.** With the sprites enabled alone the chip makes every
-  access and moves `v`, and every pixel is transparent.
-- **The last four dots of each eight from 257 to 320 make no access.** They are the sprites' pattern
-  fetches; the address lines keep the nametable address before them.
+  access and moves `v`, and every background pixel is transparent.
+- **A sprite shows a line below its Y.** Y is the line above its first row; Y = $EF–$FF keeps it off
+  the picture, and no sprite shows on line 0.
+- **Eight sprites a line.** The ninth and later in OAM's order are dropped from the line; the ninth
+  sets the overflow flag, and the search then reads the bytes after it diagonally, so the flag is
+  both missed and raised falsely.
+- **A sprite behind the background hides the sprites behind it.** The lowest unit with an opaque
+  pixel wins before the priority bit is consulted.
+- **Sprite 0 hit is the first unit's pixel against the background's.** Both opaque by their pattern
+  bits, both layers shown, not at position 255 and not in the hidden left column; set on the
+  selection's dot, two before the position's; cleared with the overflow flag at dot 1 of scanline
+  261 and by nothing else.
+- **A `$2002` read leaves the two sprite flags.** It clears the vertical-blank flag alone.
+- **`$2004` reads the OAM bus while the chip renders.** The OAM address is the evaluation's pointer
+  then, and dots 257–320 hold it at 0.
+- **An OAM address of 8 or more at a line's dot 65 copies a row of OAM.** The eight bytes at
+  `oamAddr & $F8` replace OAM's first eight as the line's evaluation begins.
 - **The picture runs four dots behind the counter.** Position `x` is resolved on dot `x + 4`; a
   write that lands between two dots shows from the next position.
 - **The picture reads `$2001` live.** Greyscale, emphasis, the two bits that show the background and
@@ -1163,14 +1477,14 @@ by the documents the chip is built from.
 3. **The chip while rendering.** The "PPU registers" page states behaviors the chip does not carry:
    a rendering toggle reaching the picture three or four dots after the write, where the picture
    here reads `$2001` on the first dot after it, the second `$2006` write reaching `v` one to one
-   and a half dots on (loaded at the write here), the OAM address forced to 0 during sprite
-   evaluation and its glitchy increment, the evaluation exposed through `$2004`, the `$2000` bit 0
-   race at dot 257, the `$2006` bus conflict, and the palette corruption; the "PPU scrolling" page
-   adds a `$2007` access while rendering stepping coarse X and Y together, where `v` steps by 1 or
-   32 here; the "PPU rendering" page adds the shift registers shifting past their loads when
-   rendering is toggled inside a line, where they neither shift nor load here while rendering is
-   disabled; and the "DMA" page adds the DPCM read conflict with `$2007`. Each is stated by its page
-   and belongs to the ports while the chip renders, the sprites or the DMC.
+   and a half dots on (loaded at the write here), the OAM address's glitchy increment on a `$2004`
+   write while rendering, the `$2000` bit 0 race at dot 257, the `$2006` bus conflict, and the
+   palette corruption; the "PPU scrolling" page adds a `$2007` access while rendering stepping
+   coarse X and Y together, where `v` steps by 1 or 32 here; the "PPU rendering" page adds the shift
+   registers shifting past their loads when rendering is toggled inside a line, where they neither
+   shift nor load here while rendering is disabled; and the "DMA" page adds the DPCM read conflict
+   with `$2007`. Each is stated by its page and belongs to the ports while the chip renders or the
+   DMC.
 4. **The 2C02G's OAM corruption on `$2003` writes.** The "PPU registers" page's OAMADDR note and
    the "Errata" page's sprite entries have a write to `$2003` copy one eight-byte row of OAM over
    another on some CPU-PPU alignments, without stating which bytes on which alignment;
@@ -1227,6 +1541,36 @@ by the documents the chip is built from.
 16. **The registers' decay.** The "PPU rendering" page has the fetch latches, the shift registers
     and the 1-bit latches decay to 0 "on a time scale of probably around 2 frames"; here they hold
     what they have for ever.
+17. **The pre-render line's sprites.** The "PPU rendering" page names the scanline -1 or 261 and has
+    its sprite fetches use what secondary OAM holds from scanline 239's evaluation; the "PPU OAM"
+    page and the "PPU sprite evaluation" page's notes have no sprite shown on the first line. The
+    chip compares every slot's Y against −1 there, so no slot has a row and every unit is loaded
+    with 0: the clear's $FF slots stay off line 0, as does a sprite scanline 239's evaluation found,
+    and `07.screen_bottom` measures a sprite at Y = 239 missing there on the console. The comparison
+    reaches a board in one place, the row bits of the addresses the pre-render line's sprite fetches
+    drive, −1 less Y against 261 less Y in their low three or four bits; a reading of the address
+    lines on Visual 2C02 would settle it.
+18. **The dot of the 2C02G's OAM copy.** The "PPU sprite evaluation" page's notes and the "PPU
+    registers" page's OAMADDR precautions state the copy's bytes, the eight at `oamAddr & $F8`, its
+    destination, OAM's first eight, and its condition, an address of 8 or more as evaluation starts,
+    and the OAMADDR section puts the start at tick 65. The chip makes the copy on dot 65 of each
+    picture line whose evaluation begins with the address at 8 or more, before that dot's read.
+    Which dot of the start it falls on, and whether a line after the first copies again, are not
+    stated. The corruption a `$2003` write makes is item 4's.
+19. **The search after the ninth sprite.** The "PPU sprite evaluation" page's step 3a reads the
+    three bytes after the Y that sets the overflow flag and says nothing of what follows. The chip
+    ends the evaluation there, as it does when the pointer passes sprite 63: each remaining even dot
+    moves the pointer a sprite and copies nothing. Only the bytes `$2004` answers on those dots
+    differ from a search that went on.
+20. **Position 255.** The "PPU OAM" page has sprite 0 hit never set at position 255 for "an obscure
+    reason related to the pixel pipeline", and says no more; the chip skips the position by rule.
+    `06.right_edge` and `11.edge_timing` measure the edge on the console and pass.
+21. **The units on the dots no pixel is selected on.** Brad Taylor's reference has a unit's counter
+    decremented every time the PPU renders a pixel, the first 256 clocks of a scanline. The chip
+    steps the units on dots 2–257 of the picture's lines, as each position is selected, and not on
+    dots 322–337 or on the pre-render line, where the background's registers shift and no pixel is
+    selected. Dots 257–320 reload every unit before anything it held could show, so the difference
+    reaches no picture.
 
 ## See also
 
@@ -1239,8 +1583,8 @@ by the documents the chip is built from.
 
 - `include/neasant/ppu/ppu.h` — the state value, the inputs, the six functions.
 - `src/ppu/ppu.cpp` — every port's write and read, the palette and CIRAM, the dot counter with its
-  flag, warm-up and skip, the background's accesses, shift registers and scroll, the picture's
-  positions, and the bus's decay.
+  flag, warm-up and skip, the background's accesses, shift registers and scroll, the sprites'
+  evaluation, output units and multiplexer, the picture's positions, and the bus's decay.
 - `tests/ppu/registers_test.cpp` — the hand-derived suite.
 - `tests/ppu/programs_test.cpp` — the register file's test programs, a sprite's byte 2 and the
   dot a `$2001` write reaches the skip on.
@@ -1250,21 +1594,24 @@ by the documents the chip is built from.
   observer.
 - `tests/ppu/background_test.cpp` — the background dot by dot on the bare chip, and drawn in the
   machine's picture.
+- `tests/ppu/sprites_test.cpp` — the sprites' evaluation, output units and multiplexer dot by dot
+  on the bare chip, drawn in the machine's picture, and blargg's sprite hit and sprite overflow
+  programs.
 
 ## Sources
 
 - **NESdev wiki** — the pages "PPU registers", "PPU scrolling", "PPU memory map", "PPU palettes",
-  "PPU OAM", "PPU rendering" with its frame timing diagram, "PPU nametables", "PPU attribute
-  tables", "PPU pattern tables", "PPU pinout", "NTSC video", "PPU frame timing", "PPU power up
-  state", "NMI", "Open bus behavior", "Cartridge connector", "CPU pinout", "CPU interrupts", "DMA"
-  and "Errata", at `https://www.nesdev.org/wiki/`.
+  "PPU OAM", "PPU sprite evaluation", "PPU sprite priority", "PPU rendering" with its frame timing
+  diagram, "PPU nametables", "PPU attribute tables", "PPU pattern tables", "PPU pinout", "NTSC
+  video", "PPU frame timing", "PPU power up state", "NMI", "Open bus behavior", "Cartridge
+  connector", "CPU pinout", "CPU interrupts", "DMA" and "Errata", at `https://www.nesdev.org/wiki/`.
 - **Brad Taylor's NTSC 2C02 technical reference** — the fifth release, 2004, which the "PPU
   rendering" page lists as its reference, at `http://nesdev.org/2C02%20technical%20reference.TXT`.
-- **The test programs** — blargg's `ppu_vbl_nmi`, `vbl_nmi_timing`,
-  `blargg_ppu_tests_2005.09.15b`, `ppu_open_bus`, `oam_read` and `oam_stress`, with their readmes
-  and sources, as the `christopherpow/nes-test-roms` repository at
-  `https://github.com/christopherpow/nes-test-roms` collects them. The tables `ppu_vbl_nmi`'s
-  readme prints for each program are published measurements of the console.
+- **The test programs** — blargg's `ppu_vbl_nmi`, `vbl_nmi_timing`, `blargg_ppu_tests_2005.09.15b`,
+  `ppu_open_bus`, `oam_read`, `oam_stress`, `sprite_hit_tests_2005.10.05` and
+  `sprite_overflow_tests`, with their readmes and sources, as the `christopherpow/nes-test-roms`
+  repository at `https://github.com/christopherpow/nes-test-roms` collects them. The tables
+  `ppu_vbl_nmi`'s readme prints for each program are published measurements of the console.
 - **The `ppudecay` test program** — lidnariq's, public domain (2023), with its source and its
   author's description of what it measures and what it reports on his console, published at
   `https://forums.nesdev.org/viewtopic.php?t=24639`.

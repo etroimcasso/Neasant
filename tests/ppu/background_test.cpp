@@ -323,10 +323,10 @@ TEST(PpuBackground, AnAddressAloneMovesTheCiramLinesAndNothingElse) {
 
 // A line's accesses run in eights from dot 1: 32 tiles on dots 1-256, each a nametable,
 // an attribute, a low pattern and a high pattern access; on dots 257-320 two nametable
-// accesses open each eight and its other four dots make none, the lines keeping the
-// second's address; two more tiles on dots 321-336; two nametable accesses on dots
-// 337-340; and the next line's dot 0 drives a low pattern address (NESdev wiki, "PPU
-// rendering", Line-by-line timing, and its frame timing diagram).
+// accesses open each eight and its other four dots fetch a sprite's two pattern bytes;
+// two more tiles on dots 321-336; two nametable accesses on dots 337-340; and the next
+// line's dot 0 drives a low pattern address (NESdev wiki, "PPU rendering", Line-by-line
+// timing, and its frame timing diagram).
 TEST(PpuBackground, ALineIsAccessesInEightsFromDot1) {
   Chip chip;
   chip.at(10, 0);
@@ -337,7 +337,7 @@ TEST(PpuBackground, ALineIsAccessesInEightsFromDot1) {
   }
   std::string expected;
   for (int tile = 0; tile < 32; ++tile) expected += "NNAALLHH";
-  for (int eight = 0; eight < 8; ++eight) expected += "NNNNNNNN";
+  for (int eight = 0; eight < 8; ++eight) expected += "NNNNLLHH";
   expected += "NNAALLHHNNAALLHHNNNN";
   EXPECT_EQ(accesses, expected);
   EXPECT_EQ(chip.state.v, 0x1002);
@@ -349,9 +349,11 @@ TEST(PpuBackground, ALineIsAccessesInEightsFromDot1) {
 // On dots 257-320 each eight opens with two nametable fetches. The first one after dot
 // 256 drives the low eight lines as `v` stood when the dot began and the high six as the
 // dot's copy of the horizontal bits leaves it; its byte is kept. The second reads the
-// tile `v` now points at and its byte is dropped. The four dots after them make no access
-// (NESdev wiki, "PPU rendering", Cycles 257-320, and its frame timing diagram's legend:
-// unused nametable fetches update the nametable byte register, ignored ones do not).
+// tile `v` now points at and its byte is dropped. The four dots after them fetch the
+// slot's sprite pattern bytes, here a slot of zeros on line 10, row 2 of tile 0, and
+// leave the nametable byte as it was (NESdev wiki, "PPU rendering", Cycles 257-320, and
+// its frame timing diagram's legend: unused nametable fetches update the nametable byte
+// register, ignored ones do not).
 TEST(PpuBackground, TheNametableFetchesOfDots257To320) {
   Chip chip;
   chip.state.v = 0x0B5A;
@@ -371,12 +373,16 @@ TEST(PpuBackground, TheNametableFetchesOfDots257To320) {
   chip.tick();  // dot 260
   EXPECT_EQ(chip.state.nametableLatch, 0x77);
   chip.state.ciram[0x745] = 0x99;
-  for (int dot = 261; dot <= 264; ++dot) {
-    chip.tick();
-    EXPECT_EQ(chip.state.addressPins, 0x2F45) << "dot " << dot;
-    EXPECT_EQ(chip.state.addressLatch, 0x45) << "dot " << dot;
-    EXPECT_EQ(chip.state.nametableLatch, 0x77) << "dot " << dot;
-  }
+  chip.tick();  // dot 261
+  EXPECT_EQ(chip.state.addressPins, 0x0002);
+  EXPECT_EQ(chip.state.addressLatch, 0x02);
+  chip.tick();  // dot 262
+  EXPECT_EQ(chip.state.nametableLatch, 0x77);
+  chip.tick();  // dot 263
+  EXPECT_EQ(chip.state.addressPins, 0x000A);
+  EXPECT_EQ(chip.state.addressLatch, 0x0A);
+  chip.tick();  // dot 264
+  EXPECT_EQ(chip.state.nametableLatch, 0x77);
   chip.tick();  // dot 265
   EXPECT_EQ(chip.state.addressPins, 0x2F45);
   chip.tick();  // dot 266

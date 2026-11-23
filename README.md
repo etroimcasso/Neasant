@@ -32,17 +32,17 @@ embeddable. Pronounced "NESn't," like Peasant with an N.
 
 ## What is built
 
-The CPU, the machine around it, the APU and the cartridge are built and documented; the PPU
-holds its register file, its frame timing, the background and the picture it draws of it, with
-no sprite drawn, and NROM is the one board. A command-line tool, `nes_render`, writes a cartridge's
-sound as a WAV file ([tools](tools/README.md)). This table gains a row's link and description
-as each component lands.
+The CPU, the machine around it, the APU and the cartridge are built and documented; the PPU holds
+its register file, its frame timing, the background, the sprites and the picture it draws of them,
+and NROM is the one board. A command-line tool, `nes_render`, writes a cartridge's sound as a WAV
+file ([tools](tools/README.md)). This table gains a row's link and description as each component
+lands.
 
 | Component | Status |
 |---|---|
 | [6502 CPU core](docs/6502-cpu.md) | **complete** — 256 opcodes, cycle-stepped, every cycle checked against the SingleStepTests nes6502 vectors; the reset, interrupt and RDY-halt sequences cycle by cycle |
 | [Machine (bus, RAM, cartridge boundary, controllers)](docs/nes-machine.md) | **complete** — the master-cycle budget, the console's bus and open bus, the two controller ports, OAM DMA, the bus, save and frame observers, snapshot and restore; the CPU's, the APU's and the PPU's self-checking test programs pass on it |
-| [PPU](docs/ppu.md) | **in progress** — the register file, the frame's timing and the NMI, the background fetched through the board and scrolled, and the picture, 9-bit dots handed to a frame observer; no sprite drawn |
+| [PPU](docs/ppu.md) | **in progress** — the register file, the frame's timing and the NMI, the background fetched through the board and scrolled, the sprites found a line ahead with sprite 0 hit and the overflow flag, and the picture, 9-bit dots handed to a frame observer; blargg's PPU, sprite hit and sprite overflow programs pass |
 | [APU](docs/apu.md) | **complete** — the frame counter with its interrupt on the CPU's IRQ line, the length counters, the status register, the pulse, triangle and noise channels, the DMC with its sample fetch through the DMA unit, the mixer, the console's output filters and the samples a host drains at the rate it names; blargg's APU, DMC and mixer test programs pass; [where the documents disagree](docs/apu-behavior.md) |
 | [Mappers](docs/nes-cartridge.md) | **in progress** — the cartridge as a value, the pin-level board boundary, NROM |
 | Peripherals | **not started** |

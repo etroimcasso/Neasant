@@ -218,3 +218,23 @@ target_include_directories(ppu_picture_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 # tests'.
 neasant_add_test(ppu_background_test ppu/background_test.cpp nes/rom_harness.cpp)
 target_include_directories(ppu_background_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
+
+# The sprites: on a bare chip secondary OAM's clear, a line's evaluation dot by dot with
+# the sprites in range copied in order, the first marked as sprite 0, the height and the
+# line deciding the range, the ninth sprite setting the overflow flag on its dot, the
+# search's diagonal walk and its end at sprite 63, the OAM address as the pointer, held at
+# 0 on dots 257-320 and copied over OAM's first row by the 2C02G, the units loaded from
+# secondary OAM with each flip, $2000 bit 3, 8x16 sprites, a slot out of range and the
+# pre-render line loading transparent registers, the units counting down and shifting,
+# the frontmost opaque unit, the priority multiplexer, sprite 0 hit on the selection's
+# dot with the conditions it needs, the flags' clear and the $2002 read, $2004 answering
+# the OAM bus, and rendering disabled; on the machine a sprite a line below its Y, the
+# flips, an 8x16 sprite, the sprites' order and priority against the background, the
+# left column, nine on a line, the first line, the hit's cycle, a program through the
+# ports and machines equal watched, unwatched and restored; then blargg's eleven
+# sprite_hit_tests and five sprite_overflow_tests. NEASANT_NES_TEST_ROMS and
+# NEASANT_REQUIRE_NES_TEST_ROMS as the CPU programs' test takes them.
+neasant_add_test(ppu_sprites_test ppu/sprites_test.cpp nes/rom_harness.cpp)
+target_include_directories(ppu_sprites_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
+target_compile_definitions(ppu_sprites_test PRIVATE
+  NEASANT_NES_TEST_ROMS="${NEASANT_NES_TEST_ROMS}")

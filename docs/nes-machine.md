@@ -12,9 +12,9 @@ and drains the sound as frames.
 The machine runs a program's code against the console's bus, its timing and its interrupts, and the
 CPU's, the APU's and the PPU's self-checking test programs pass on it ([Testing against the
 programs](#testing-against-the-programs)). The PPU is its register file, its memories, its frame
-counter, its NMI output, its background and its picture, the background drawn over the backdrop with
-rendering enabled and no sprite drawn ([the PPU page](ppu.md#the-picture)). The APU is built whole:
-its frame counter, its five channels with the DMC fetching its samples through the DMA unit, both
+counter, its NMI output, its background, its sprites and its picture, both layers drawn over the
+backdrop with rendering enabled ([the PPU page](ppu.md#the-picture)). The APU is built whole: its
+frame counter, its five channels with the DMC fetching its samples through the DMA unit, both
 interrupts on the CPU's IRQ line, its mixer and the console's output filters, whose output is
 averaged down to the frames a host drains ([The APU](#the-apu)). PAL and Dendy are named by `Region`
 and refused at construction, so every machine is NTSC.

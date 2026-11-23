@@ -76,8 +76,20 @@ constexpr std::uint16_t kLastPictureLine = 239;
   return (address & 0x03u) == 0x02u ? static_cast<std::uint8_t>(byte & 0xE3u) : byte;
 }
 
+// What a read of $2004 answers: the byte on the chip's OAM bus while the chip renders,
+// on scanlines 0-239 and 261 with rendering enabled as the frame counter reads it, and
+// otherwise the OAM byte at the OAM address (NESdev wiki, "PPU registers", OAMDATA:
+// reads during rendering expose the internal accesses of sprite evaluation and loading,
+// and reads during vertical or forced blanking return the byte at the address).
+[[nodiscard]] std::uint8_t oamAnswer(const PpuState& state) noexcept {
+  const bool renderedLine =
+      state.scanline <= kLastPictureLine || state.scanline == kPreRenderScanline;
+  if (renderedLine && renderingAtTheCounter(state)) return state.oamBus;
+  return oamByte(state, state.oamAddr);
+}
+
 // The value the chip drives for the picture position the dot resolves. With rendering
-// enabled it is the palette entry `pixel` addresses, the background's pixel for the
+// enabled it is the palette entry `pixel` addresses, the multiplexer's pixel for the
 // position, and a transparent pixel, 0, addresses the backdrop, entry 0; with rendering
 // disabled it is the backdrop, or the entry the low 14 bits of `v` name while they are
 // in the palette's range; under greyscale, with $2001's emphasis bits above it (NESdev
@@ -139,8 +151,9 @@ void stepAddress(PpuState& state) noexcept {
   state.v = static_cast<std::uint16_t>((state.v + step) & 0x7FFFu);
 }
 
-// The accesses the background makes: the four of a tile, and the nametable fetch whose
-// byte the chip does not keep.
+// The accesses the chip makes while it renders: the four of a background tile, the
+// nametable fetch whose byte the chip does not keep, and the two pattern bytes of a
+// sprite.
 enum class Fetch : std::uint8_t {
   None,
   Nametable,
@@ -148,34 +161,96 @@ enum class Fetch : std::uint8_t {
   Attribute,
   PatternLow,
   PatternHigh,
+  SpritePatternLow,
+  SpritePatternHigh,
 };
 
 // The access dot `dot` of a rendered scanline belongs to, for dots 1-340. An access is
 // two dots and a line's accesses run in eights from dot 1. Dots 1-256 and 321-336 fetch
 // a tile every eight: its nametable byte, its attribute byte, its low pattern byte and
 // its high one. Each eight of dots 257-320 opens with two nametable fetches, the first
-// kept and the second dropped, and its last four dots make no access; dots 337-340 are
-// two nametable fetches, kept and dropped (NESdev wiki, "PPU rendering", Line-by-line
-// timing, and its frame timing diagram with its legend: an unused nametable fetch
-// updates the nametable byte register and an ignored one does not).
+// kept and the second dropped, and its last four dots fetch the two pattern bytes of the
+// sprite in the eight's slot of secondary OAM; dots 337-340 are two nametable fetches,
+// kept and dropped (NESdev wiki, "PPU rendering", Line-by-line timing, and its frame
+// timing diagram with its legend: an unused nametable fetch updates the nametable byte
+// register and an ignored one does not).
 [[nodiscard]] Fetch fetchOn(std::uint16_t dot) noexcept {
   constexpr std::array<Fetch, 4> kTile{Fetch::Nametable, Fetch::Attribute, Fetch::PatternLow,
                                        Fetch::PatternHigh};
-  constexpr std::array<Fetch, 4> kPair{Fetch::Nametable, Fetch::NametableDropped, Fetch::None,
-                                       Fetch::None};
+  constexpr std::array<Fetch, 4> kPair{Fetch::Nametable, Fetch::NametableDropped,
+                                       Fetch::SpritePatternLow, Fetch::SpritePatternHigh};
   if (dot == 0) return Fetch::None;
   const std::size_t slot = static_cast<std::size_t>(((dot - 1u) & 7u) >> 1);
   if (dot <= 256 || (dot >= 321 && dot <= 336)) return kTile[slot];
   return kPair[slot];
 }
 
+// The sprites' height in rows, 8 or 16 as $2000 bit 5 says (NESdev wiki, "PPU
+// registers", PPUCTRL).
+[[nodiscard]] int spriteHeight(const PpuState& state) noexcept {
+  return (state.ctrl & 0x20u) != 0 ? 16 : 8;
+}
+
+// The line the sprites' Y bytes are compared against: the scanline's number on the
+// picture's lines, and -1 on the pre-render line, the number the page gives it (NESdev
+// wiki, "PPU rendering", Pre-render scanline (-1 or 261)).
+[[nodiscard]] int spriteLine(const PpuState& state) noexcept {
+  return state.scanline == kPreRenderScanline ? -1 : static_cast<int>(state.scanline);
+}
+
+// Whether a sprite whose byte 0 is `y` has a row on the line after `line`: the line less
+// `y` is a row of the sprite, 0 to its height less one. The difference is taken whole,
+// so a sprite below the line, or one whose Y is $FF, is never in range (NESdev wiki,
+// "PPU sprite evaluation", Details; "PPU OAM", Byte 0 - Y position; Brad Taylor's NTSC
+// 2C02 technical reference, In-range object evaluation: a 9-bit difference).
+[[nodiscard]] bool spriteInRange(const PpuState& state, int line, std::uint8_t y) noexcept {
+  const int row = line - static_cast<int>(y);
+  return row >= 0 && row < spriteHeight(state);
+}
+
+// The slot of secondary OAM dots 257-320 are reading, 0-7, eight dots each.
+[[nodiscard]] std::size_t spriteSlot(std::uint16_t dot) noexcept {
+  return static_cast<std::size_t>((dot - 257u) >> 3);
+}
+
+// The address of a sprite's pattern byte for the line, from its slot's Y and tile bytes
+// and its unit's attribute byte. An 8x8 sprite's row is the line less its Y, in the half
+// of the pattern table $2000 bit 3 selects; an 8x16 sprite's sixteen rows are two tiles,
+// the even one and the one after it, in the half bit 0 of its tile byte selects; a
+// vertical flip takes the rows from the bottom; the high byte is eight above the low. The
+// row is the difference's low bits whatever the difference, so a slot holding no sprite
+// for the line, tile $FF, drives an address all the same (NESdev wiki, "PPU pattern
+// tables", Addressing; "PPU OAM", Byte 1 - Tile/index and Byte 2 - Attributes; "PPU
+// rendering", Cycles 257-320).
+[[nodiscard]] std::uint16_t spriteAddress(const PpuState& state, std::size_t slot,
+                                          bool high) noexcept {
+  const std::uint8_t y = state.secondaryOam[slot * 4];
+  const std::uint8_t tile = state.secondaryOam[slot * 4 + 1];
+  const std::uint8_t attribute = state.spriteUnits[slot].attribute;
+  const auto last = static_cast<unsigned>(spriteHeight(state) - 1);
+  unsigned row = static_cast<unsigned>(spriteLine(state) - static_cast<int>(y)) & last;
+  if ((attribute & 0x80u) != 0) row ^= last;
+  const unsigned byte = high ? 0x08u : 0u;
+  if (last == 15u) {
+    return static_cast<std::uint16_t>(((tile & 0x01u) << 12) |
+                                      (((tile & 0xFEu) + (row >> 3)) << 4) | (row & 0x07u) |
+                                      byte);
+  }
+  return static_cast<std::uint16_t>(((state.ctrl & 0x08u) << 9) |
+                                    (static_cast<unsigned>(tile) << 4) | row | byte);
+}
+
 // The address an access drives. A nametable fetch reads the tile `v` points at and an
 // attribute fetch the byte that covers that tile (NESdev wiki, "PPU scrolling", Tile and
 // attribute fetching). A pattern fetch reads the row `v`'s fine Y names of the tile the
 // nametable latch names, in the half of the pattern table $2000 bit 4 selects, the high
-// byte eight above the low (NESdev wiki, "PPU pattern tables", Addressing).
+// byte eight above the low (NESdev wiki, "PPU pattern tables", Addressing). A sprite's
+// pattern fetch reads the row spriteAddress gives.
 [[nodiscard]] std::uint16_t fetchAddress(const PpuState& state, Fetch fetch) noexcept {
   switch (fetch) {
+    case Fetch::SpritePatternLow:
+    case Fetch::SpritePatternHigh:
+      return spriteAddress(state, spriteSlot(state.dot), fetch == Fetch::SpritePatternHigh);
     case Fetch::Attribute:
       return static_cast<std::uint16_t>(0x23C0u | (state.v & 0x0C00u) | ((state.v >> 4) & 0x38u) |
                                         ((state.v >> 2) & 0x07u));
@@ -254,12 +329,26 @@ void addressDot(PpuState& state, const PpuInputs& inputs, Fetch fetch, std::uint
   static_cast<void>(boardPpuAccess(inputs.board, inputs.cartridge, pins, inputs.chrRam));
 }
 
+// A byte with its bits reversed. A pattern byte's bit 7 is the tile's leftmost pixel,
+// and the shift registers put the leftmost pixel where it leaves first (NESdev wiki,
+// "PPU pattern tables"; "PPU rendering", Picture region).
+[[nodiscard]] std::uint8_t reversed(std::uint8_t byte) noexcept {
+  unsigned out = 0;
+  for (unsigned bit = 0; bit < 8; ++bit) {
+    if ((byte >> bit) & 1u) out |= 0x80u >> bit;
+  }
+  return static_cast<std::uint8_t>(out);
+}
+
 // The second dot of an access: the read, at the high six lines as the chip drives them
 // now, after the dot's own move of `v`, over the low eight the latch holds, and the byte
 // into its latch. An attribute byte leaves its two bits for the tile, the pair bit 1 of
 // `v`'s coarse X and bit 1 of its coarse Y select (NESdev wiki, "PPU rendering", its
 // notes: reads come from an address composed of the latched low 8 bits and the current
-// high 6 bits; "PPU attribute tables").
+// high 6 bits; "PPU attribute tables"). A sprite's pattern byte enters its unit's
+// register with the leftmost pixel at bit 0, reversed unless the sprite is flipped
+// horizontally, and as 0 when the slot's Y has no row on the line (NESdev wiki, "PPU
+// rendering", Cycles 257-320; "PPU OAM", Byte 2 - Attributes).
 void readDot(PpuState& state, const PpuInputs& inputs, Fetch fetch) {
   state.addressPins = static_cast<std::uint16_t>((fetchAddress(state, fetch) & 0x3F00u) |
                                                  (state.addressPins & 0x00FFu));
@@ -281,20 +370,25 @@ void readDot(PpuState& state, const PpuInputs& inputs, Fetch fetch) {
     case Fetch::PatternHigh:
       state.patternLatch[1] = byte;
       return;
+    case Fetch::SpritePatternLow:
+    case Fetch::SpritePatternHigh: {
+      const std::size_t slot = spriteSlot(state.dot);
+      SpriteUnit& unit = state.spriteUnits[slot];
+      const bool inRange = spriteInRange(state, spriteLine(state), state.secondaryOam[slot * 4]);
+      const std::uint8_t row = (unit.attribute & 0x40u) != 0 ? byte : reversed(byte);
+      unit.pattern[fetch == Fetch::SpritePatternHigh ? 1 : 0] = inRange ? row : std::uint8_t{0};
+      return;
+    }
     default:
       return;
   }
 }
 
-// A pattern byte as a shift register's high eight bits take it: its bit 7, the tile's
-// leftmost pixel, at bit 8, the first to reach the low eight (NESdev wiki, "PPU pattern
-// tables"; "PPU rendering", Picture region).
+// A pattern byte as a background shift register's high eight bits take it: its bit 7,
+// the tile's leftmost pixel, at bit 8, the first to reach the low eight (NESdev wiki,
+// "PPU pattern tables"; "PPU rendering", Picture region).
 [[nodiscard]] std::uint16_t loaded(std::uint8_t byte) noexcept {
-  std::uint16_t reversed = 0;
-  for (unsigned bit = 0; bit < 8; ++bit) {
-    if ((byte >> bit) & 1u) reversed = static_cast<std::uint16_t>(reversed | (0x80u >> bit));
-  }
-  return static_cast<std::uint16_t>(reversed << 8);
+  return static_cast<std::uint16_t>(static_cast<unsigned>(reversed(byte)) << 8);
 }
 
 // The background's pixel for picture position `position`: the bit the fine X scroll
@@ -337,19 +431,185 @@ void reloadBackground(PpuState& state) noexcept {
   state.attributeFeed = state.attributeLatch;
 }
 
-// The background's work on a dot with rendering enabled, answering the pixel selected
-// on it, 0 when none is. On scanlines 0-239 and 261: dots 2-257 and 322-337 shift, the
-// picture's scanlines first selecting the pixel of the position two dots behind on dots
-// 2-257, and the registers reload after the shift on every eighth dot from 9 to 257 and
-// on dots 329 and 337; then `v`'s move for the dot and the dot's half of an access, the
-// move falling after the latch has captured an address's low eight and before the high
-// six lines and a read are taken. Dot 0 of scanlines 0-240 drives the low pattern byte's
-// address and reads nothing. `skipped` is the dot an odd frame reaches from dot 339 of
-// scanline 261, which makes the read dot 340 would have made in place of dot 0's address
-// (NESdev wiki, "PPU rendering", Pre-render scanline, Cycle 0, Cycles 1-256 and Cycles
-// 257-320, and its frame timing diagram).
-[[nodiscard]] std::uint8_t backgroundDot(PpuState& state, const PpuInputs& inputs,
-                                         bool skipped) {
+// What the sprites contribute to picture position `position`, stepping the eight units:
+// a unit whose X counter is not 0 counts it down; one whose counter is 0 shifts its
+// registers out a pixel, its pattern's two bits; and the frontmost unit with an opaque
+// pixel wins, whatever its priority. The pixel is the winner's palette over its pattern,
+// and 0 when no unit's is opaque, while $2001 bit 4 is clear, and in the eight leftmost
+// positions while bit 2 is; `behind` is the winner's priority bit and `unit0` whether the
+// winner is the first unit (NESdev wiki, "PPU sprite priority", Detailed internals of
+// the sprite priority quirk; "PPU registers", PPUMASK, Rendering control; Brad Taylor's
+// NTSC 2C02 technical reference, Details of object pattern fetch & render: the counter
+// is decremented every pixel and the registers serialize once it is 0).
+struct SpritePixel {
+  std::uint8_t pixel = 0;
+  bool behind = false;
+  bool unit0 = false;
+};
+
+[[nodiscard]] SpritePixel spritePixel(PpuState& state, unsigned position) noexcept {
+  SpritePixel out;
+  for (std::size_t index = 0; index < state.spriteUnits.size(); ++index) {
+    SpriteUnit& unit = state.spriteUnits[index];
+    if (unit.x != 0) {
+      --unit.x;
+      continue;
+    }
+    const unsigned pattern = (unit.pattern[0] & 1u) | ((unit.pattern[1] & 1u) << 1);
+    unit.pattern[0] = static_cast<std::uint8_t>(unit.pattern[0] >> 1);
+    unit.pattern[1] = static_cast<std::uint8_t>(unit.pattern[1] >> 1);
+    if (pattern != 0 && out.pixel == 0) {
+      out.pixel = static_cast<std::uint8_t>(((unit.attribute & 0x03u) << 2) | pattern);
+      out.behind = (unit.attribute & 0x20u) != 0;
+      out.unit0 = index == 0;
+    }
+  }
+  if ((state.mask & 0x10u) == 0 || (position < 8 && (state.mask & 0x04u) == 0)) return {};
+  return out;
+}
+
+// The pixel selected for picture position `position`: the background's and the sprites'
+// through the priority multiplexer, a sprite's with bit 4 set. Both transparent gives 0,
+// the backdrop; one opaque gives that one; both opaque gives the sprite's unless its
+// priority bit puts it behind. Sprite 0 hit is set where both are opaque and the
+// sprite's is the first unit's with sprite 0 in it, at every position but 255 (NESdev
+// wiki, "PPU rendering", Picture region and its priority multiplexer decision table;
+// "PPU OAM", Sprite 0 hits; "PPU registers", PPUSTATUS, Sprite 0 hit flag).
+[[nodiscard]] std::uint8_t selectPixel(PpuState& state, unsigned position) noexcept {
+  const std::uint8_t background = backgroundPixel(state, position);
+  const SpritePixel sprite = spritePixel(state, position);
+  if (background != 0 && sprite.pixel != 0 && sprite.unit0 && state.sprite0Current &&
+      position != 255) {
+    state.sprite0Hit = true;
+  }
+  if (sprite.pixel == 0) return background;
+  if (background == 0 || !sprite.behind) return static_cast<std::uint8_t>(0x10u | sprite.pixel);
+  return background;
+}
+
+// The evaluation's step on an even dot of 66-256, on the byte the odd dot before it read
+// onto the OAM bus (NESdev wiki, "PPU sprite evaluation", Details, its numbered steps). A
+// sprite being copied gets its next byte into secondary OAM, or has it read past once
+// eight are found; otherwise the byte is a Y, written to the next free byte while one is
+// free: in range, its sprite's three other bytes follow it, and the first sprite the
+// line looked at marks sprite 0 for the next line; out of range, the pointer moves to
+// the next sprite. Once eight are found the writes stop, a Y in range sets the overflow
+// flag and three more bytes are read, and a Y out of range moves the pointer to the
+// next sprite and the next byte at once, the fault that reads the bytes diagonally. When
+// the pointer passes sprite 63 the evaluation is done, and so it is after the ninth
+// sprite's three bytes: each even dot then moves the pointer a sprite and copies nothing.
+void evaluateEven(PpuState& state) noexcept {
+  const bool full = state.secondaryAddress >= state.secondaryOam.size();
+  if (state.evaluationDone) {
+    state.oamAddr = static_cast<std::uint8_t>(state.oamAddr + 4u);
+    return;
+  }
+  if (state.copyLeft != 0) {
+    if (!full) state.secondaryOam[state.secondaryAddress++] = state.oamBus;
+    state.oamAddr = static_cast<std::uint8_t>(state.oamAddr + 1u);
+    --state.copyLeft;
+    if (state.copyLeft == 0 && (full || state.oamAddr < 4u)) state.evaluationDone = true;
+    return;
+  }
+  const bool inRange = spriteInRange(state, spriteLine(state), state.oamBus);
+  if (!full) {
+    state.secondaryOam[state.secondaryAddress] = state.oamBus;
+    if (inRange) {
+      if (state.dot == 66) state.sprite0Next = true;
+      ++state.secondaryAddress;
+      state.copyLeft = 3;
+      state.oamAddr = static_cast<std::uint8_t>(state.oamAddr + 1u);
+    } else {
+      state.oamAddr = static_cast<std::uint8_t>(state.oamAddr + 4u);
+      if (state.oamAddr < 4u) state.evaluationDone = true;
+    }
+    return;
+  }
+  if (inRange) {
+    state.spriteOverflow = true;
+    state.copyLeft = 3;
+    state.oamAddr = static_cast<std::uint8_t>(state.oamAddr + 1u);
+    return;
+  }
+  state.oamAddr = static_cast<std::uint8_t>(((state.oamAddr + 4u) & 0xFCu) |
+                                            ((state.oamAddr + 1u) & 0x03u));
+  if (state.oamAddr < 4u) state.evaluationDone = true;
+}
+
+// The sprites' work on a dot of a rendered scanline, after the background's, as the chip
+// accesses OAM and secondary OAM. On scanlines 0-239: dots 1-64 clear secondary OAM, each
+// odd dot putting $FF on the OAM bus and each even dot writing it to the next byte, and
+// dot 1 clears sprite 0's flag for the next line; dot 65 begins the evaluation at the
+// first free byte and, the chip being a 2C02G, copies the eight-byte row of OAM the OAM
+// address is in over OAM's first eight bytes when the address is 8 or more; each odd dot
+// of 65-255 reads OAM at the OAM address onto the bus, and each even dot of 66-256 takes
+// the evaluation's step. On scanlines 0-239 and 261: dots 257-320 hold the OAM address
+// at 0 and read each slot of secondary OAM onto the bus, its four bytes on the first four
+// dots of its eight and its X on the other four, the attribute into the slot's unit on
+// the third dot and the X into its counter on the fourth, and dot 257 takes sprite 0's
+// flag for the line from the one the evaluation set; dots 321-340 read the first byte of
+// secondary OAM, as dot 0 of scanlines 0-240 does (NESdev wiki, "PPU sprite evaluation",
+// Details and Notes; "PPU rendering", Cycles 257-320; "PPU registers", OAMADDR, Values
+// during rendering and OAMADDR precautions; "PPU OAM", Internal operation).
+void spriteDot(PpuState& state) noexcept {
+  const std::uint16_t dot = state.dot;
+  const bool picture = state.scanline <= kLastPictureLine;
+  if (dot == 0) {
+    if (state.scanline <= kPostRenderScanline) state.oamBus = state.secondaryOam[0];
+    return;
+  }
+  if (dot <= 64) {
+    if (!picture) return;
+    if (dot == 1) state.sprite0Next = false;
+    state.oamBus = 0xFF;
+    if ((dot & 1u) == 0) state.secondaryOam[static_cast<std::size_t>((dot >> 1) - 1u)] = 0xFF;
+    return;
+  }
+  if (dot <= 256) {
+    if (!picture) return;
+    if ((dot & 1u) != 0) {
+      if (dot == 65) {
+        state.secondaryAddress = 0;
+        state.copyLeft = 0;
+        state.evaluationDone = false;
+        if (state.oamAddr >= 8u) {
+          const std::size_t row = state.oamAddr & 0xF8u;
+          for (std::size_t byte = 0; byte < 8; ++byte) state.oam[byte] = state.oam[row + byte];
+        }
+      }
+      state.oamBus = oamByte(state, state.oamAddr);
+    } else {
+      evaluateEven(state);
+    }
+    return;
+  }
+  if (dot <= 320) {
+    state.oamAddr = 0;
+    const std::size_t slot = spriteSlot(dot);
+    const unsigned step = (dot - 257u) & 7u;
+    if (dot == 257) state.sprite0Current = state.sprite0Next;
+    state.oamBus = state.secondaryOam[slot * 4 + (step < 3u ? step : 3u)];
+    if (step == 2) state.spriteUnits[slot].attribute = state.oamBus;
+    if (step == 3) state.spriteUnits[slot].x = state.oamBus;
+    return;
+  }
+  state.oamBus = state.secondaryOam[0];
+}
+
+// The chip's work on a dot with rendering enabled, answering the pixel selected on it, 0
+// when none is. On scanlines 0-239 and 261: dots 2-257 and 322-337 shift the background's
+// registers, the picture's scanlines first selecting the pixel of the position two dots
+// behind on dots 2-257, from the background's registers and the sprites' units through
+// the multiplexer, and the background's registers reload after the shift on every eighth
+// dot from 9 to 257 and on dots 329 and 337; then `v`'s move for the dot and the dot's
+// half of an access, the move falling after the latch has captured an address's low
+// eight and before the high six lines and a read are taken; then the sprites' work on
+// OAM. Dot 0 of scanlines 0-240 drives the low pattern byte's address and reads nothing.
+// `skipped` is the dot an odd frame reaches from dot 339 of scanline 261, which makes
+// the read dot 340 would have made in place of dot 0's address (NESdev wiki, "PPU
+// rendering", Pre-render scanline, Cycle 0, Cycles 1-256 and Cycles 257-320, and its
+// frame timing diagram).
+[[nodiscard]] std::uint8_t renderDot(PpuState& state, const PpuInputs& inputs, bool skipped) {
   const std::uint16_t dot = state.dot;
   const std::uint16_t scanline = state.scanline;
   if (skipped) {
@@ -360,6 +620,7 @@ void reloadBackground(PpuState& state) noexcept {
     if (scanline <= kPostRenderScanline) {
       addressDot(state, inputs, Fetch::PatternLow,
                  static_cast<std::uint8_t>(fetchAddress(state, Fetch::PatternLow) & 0xFFu));
+      spriteDot(state);
     }
     return 0;
   }
@@ -367,19 +628,21 @@ void reloadBackground(PpuState& state) noexcept {
   if (scanline > kLastPictureLine && !preRender) return 0;
   std::uint8_t selected = 0;
   if ((dot >= 2 && dot <= 257) || (dot >= 322 && dot <= 337)) {
-    if (!preRender && dot <= 257) selected = backgroundPixel(state, dot - 2u);
+    if (!preRender && dot <= 257) selected = selectPixel(state, dot - 2u);
     shiftBackground(state);
     if ((dot & 7u) == 1) reloadBackground(state);
   }
   const Fetch fetch = fetchOn(dot);
   const auto low = static_cast<std::uint8_t>(fetchAddress(state, fetch) & 0xFFu);
   moveV(state, dot, preRender);
-  if (fetch == Fetch::None) return selected;
-  if ((dot & 1u) != 0) {
-    addressDot(state, inputs, fetch, low);
-  } else {
-    readDot(state, inputs, fetch);
+  if (fetch != Fetch::None) {
+    if ((dot & 1u) != 0) {
+      addressDot(state, inputs, fetch, low);
+    } else {
+      readDot(state, inputs, fetch);
+    }
   }
+  spriteDot(state);
   return selected;
 }
 
@@ -490,11 +753,13 @@ std::uint8_t ppuRead(PpuState& state, std::uint8_t port, const PpuInputs& inputs
   switch (port) {
     case 2: {
       // NESdev wiki, "NMI", Operation: the flag is answered and then cleared; "PPU
-      // scrolling", $2002 read: the toggle is cleared; "Open bus behavior", PPU open
-      // bus: bits 7-5 of the I/O bus are driven and its low five bits are answered as
-      // they stand.
-      const auto value =
-          static_cast<std::uint8_t>((state.vblank ? 0x80u : 0u) | (state.ioLatch & 0x1Fu));
+      // registers", PPUSTATUS: the sprite 0 hit and overflow flags are answered in bits
+      // 6 and 5 and left; "PPU scrolling", $2002 read: the toggle is cleared; "Open bus
+      // behavior", PPU open bus: bits 7-5 of the I/O bus are driven and its low five
+      // bits are answered as they stand.
+      const auto value = static_cast<std::uint8_t>(
+          (state.vblank ? 0x80u : 0u) | (state.sprite0Hit ? 0x40u : 0u) |
+          (state.spriteOverflow ? 0x20u : 0u) | (state.ioLatch & 0x1Fu));
       state.vblank = false;
       state.w = false;
       driveBus(state, value, 0xE0, inputs);
@@ -502,10 +767,11 @@ std::uint8_t ppuRead(PpuState& state, std::uint8_t port, const PpuInputs& inputs
     }
     case 4:
       // NESdev wiki, "PPU registers", OAMDATA: a read answers the byte at the OAM
-      // address and does not step it; "PPU OAM", Byte 2 - Attributes: a sprite's byte 2
-      // answers five bits; "Open bus behavior", PPU open bus: the byte answered is driven
-      // onto the I/O bus whole.
-      driveBus(state, oamByte(state, state.oamAddr), 0xFF, inputs);
+      // address and does not step it, and while the chip renders it exposes the chip's
+      // own accesses to OAM; "PPU OAM", Byte 2 - Attributes: a sprite's byte 2 answers
+      // five bits; "Open bus behavior", PPU open bus: the byte answered is driven onto
+      // the I/O bus whole.
+      driveBus(state, oamAnswer(state), 0xFF, inputs);
       return state.ioLatch;
     case 7: {
       const auto address = static_cast<std::uint16_t>(state.v & kAddressMask);
@@ -539,9 +805,11 @@ std::uint8_t ppuRead(PpuState& state, std::uint8_t port, const PpuInputs& inputs
 std::uint8_t ppuPeekRegister(const PpuState& state, std::uint8_t port) noexcept {
   switch (port) {
     case 2:
-      return static_cast<std::uint8_t>((state.vblank ? 0x80u : 0u) | (state.ioLatch & 0x1Fu));
+      return static_cast<std::uint8_t>(
+          (state.vblank ? 0x80u : 0u) | (state.sprite0Hit ? 0x40u : 0u) |
+          (state.spriteOverflow ? 0x20u : 0u) | (state.ioLatch & 0x1Fu));
     case 4:
-      return oamByte(state, state.oamAddr);
+      return oamAnswer(state);
     case 7: {
       const auto address = static_cast<std::uint16_t>(state.v & kAddressMask);
       if (address >= kPaletteBase) {
@@ -556,10 +824,11 @@ std::uint8_t ppuPeekRegister(const PpuState& state, std::uint8_t port) noexcept 
 
 PpuDotEvent ppuTickDot(PpuState& state, bool statusRead, const PpuInputs& inputs) {
   // The order of work in a dot: the count of a $2001 write on its way; the counter's
-  // step; the flag and the warm-up at dot 1; the background's dot, which selects the
-  // pixel of the position two dots behind, shifts, reloads, moves `v` and makes its half
-  // of an access; the picture's position, drawn from the pixel selected two dots ago,
-  // and that pixel's successors moved a place; the I/O bus's decay.
+  // step; the flags and the warm-up at dot 1; the rendered dot, which selects the pixel
+  // of the position two dots behind from the background's registers and the sprites'
+  // units, shifts, reloads, moves `v`, makes its half of an access and does the sprites'
+  // work on OAM; the picture's position, drawn from the pixel selected two dots ago, and
+  // that pixel's successors moved a place; the I/O bus's decay.
   //
   // A write to $2001 comes a dot closer to the frame counter; the dot that takes the
   // count to zero reads the write.
@@ -600,15 +869,19 @@ PpuDotEvent ppuTickDot(PpuState& state, bool statusRead, const PpuInputs& inputs
       event = PpuDotEvent::VerticalBlank;
     }
     if (state.scanline == kPreRenderScanline) {
+      // NESdev wiki, "PPU registers", PPUSTATUS: the three flags are cleared on dot 1 of
+      // the pre-render scanline.
       state.vblank = false;
+      state.sprite0Hit = false;
+      state.spriteOverflow = false;
       state.warmingUp = false;
     }
   }
   // NESdev wiki, "PPU registers", PPUMASK, Rendering control: rendering is the chip
-  // fetching memory and drawing, and the frame counter runs the background's dot while
-  // it reads rendering enabled.
+  // fetching memory and drawing, and the frame counter runs the rendered dot while it
+  // reads rendering enabled.
   const std::uint8_t selected =
-      renderingAtTheCounter(state) ? backgroundDot(state, inputs, skipped) : std::uint8_t{0};
+      renderingAtTheCounter(state) ? renderDot(state, inputs, skipped) : std::uint8_t{0};
   // NESdev wiki, "PPU rendering", Drawing overview and Cycles 1-256, and its frame timing
   // diagram's notes: the dot resolves the picture position four dots behind the counter,
   // from the pixel selected two dots behind it, whether or not anything stores it; the
