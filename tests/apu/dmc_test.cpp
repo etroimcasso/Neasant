@@ -274,15 +274,6 @@ void expectPass(const std::string& relative, Report report, bool pads = false) {
                              << result.text << "\n------------";
 }
 
-// Registers a program the machine cannot run: the file is looked for as above, so a
-// required clone that lacks it fails, and the case then skips naming what it needs.
-void skipNeeding(const std::string& relative, const std::string& needs) {
-  std::optional<Bytes> image;
-  loadOrSkip(relative, image);
-  if (!image) return;
-  GTEST_SKIP() << relative << " needs " << needs;
-}
-
 // Registers a program no readme, source or filed document describes, looked for as above:
 // what it reports cannot be read as a pass or a failure until a description is found.
 void skipUndescribed(const std::string& relative) {
@@ -294,15 +285,16 @@ void skipUndescribed(const std::string& relative) {
 }
 
 // The CRC a program of blargg's read4 set prints as its last line, booted with its first
-// cycle in the APU half `half`, read off the screen once a line holds exactly eight
-// hexadecimal digits after its leading spaces (`print_crc` in its `crc.s`); empty if none
-// appears within 120 frames, and nothing at all when the case was skipped or failed for
-// the file.
-std::optional<std::string> screenCrc(const std::string& relative, std::uint8_t half) {
+// cycle in the APU half `half` under `alignment`, read off the screen once a line holds
+// exactly eight hexadecimal digits after its leading spaces (`print_crc` in its `crc.s`);
+// empty if none appears within 120 frames, and nothing at all when the case was skipped
+// or failed for the file.
+std::optional<std::string> screenCrc(const std::string& relative, std::uint8_t half,
+                                     std::uint8_t alignment = 0) {
   std::optional<Bytes> image;
   loadOrSkip(relative, image);
   if (!image) return std::nullopt;
-  Nes machine(NesConfig{.rom = *image, .apuPhase = half});
+  Nes machine(NesConfig{.rom = *image, .alignment = alignment, .apuPhase = half});
   for (int frame = 0; frame < 120; ++frame) {
     machine.run(kFrame);
     std::istringstream lines(screenText(machine.state()));
@@ -1016,15 +1008,22 @@ TEST(ApuTest, Singles8DmcRates) {
 }
 
 // "DMC DMA during $2007 read causes 2-3 extra $2007 reads before real read", its two CRCs
-// 159A7A8F and 5E3DF9C4 by alignment (its source). The machine makes three extra reads under
-// every alignment and both halves, printing 5E3DF9C4; 20 frames.
+// by alignment (its source). The halted CPU repeats the read on the fetch's halt, dummy
+// and alignment cycles, so the PPU is handed four reads three dots apart but for the
+// fetch's own cycle: under alignments 0, 1 and 3 every read is made and the resumed read
+// answers the fourth byte, 44 55, 5E3DF9C4; under alignment 2 the second of two reads
+// three dots apart is dropped and it answers the third, 33 44, 159A7A8F (Visual 2C02);
+// 20 frames.
 TEST(DmcDmaDuringRead4, Dma2007Read) {
-  const std::optional<std::string> get = screenCrc("dmc_dma_during_read4/dma_2007_read.nes", kGet);
-  if (!get) return;
-  EXPECT_EQ(*get, "5E3DF9C4");
-  const std::optional<std::string> put = screenCrc("dmc_dma_during_read4/dma_2007_read.nes", kPut);
-  if (!put) return;
-  EXPECT_EQ(*put, "5E3DF9C4");
+  for (std::uint8_t alignment = 0; alignment < 4; ++alignment) {
+    const char* expected = alignment == 2 ? "159A7A8F" : "5E3DF9C4";
+    for (const std::uint8_t half : {kGet, kPut}) {
+      const std::optional<std::string> crc =
+          screenCrc("dmc_dma_during_read4/dma_2007_read.nes", half, alignment);
+      if (!crc) return;
+      EXPECT_EQ(*crc, expected) << "alignment " << int{alignment} << ", half " << int{half};
+    }
+  }
 }
 
 // "DMC DMA during $2007 write has no effect" (its source); 24 frames.
@@ -1039,11 +1038,23 @@ TEST(DmcDmaDuringRead4, Dma4016Read) {
 }
 
 // "Double read of $2007 sometimes ignores extra read, and puts odd things into buffer", its
-// four CRCs by alignment (its source), with no DMA at all; the machine prints D84F6815, its
-// $2007 read on adjacent cycles two full reads.
+// four CRCs by alignment (its source), with no DMA at all. `LDA $20F7,X` with X = $10 reads
+// $2007 on two adjacent cycles: under alignments 0, 1 and 3 both reads are made and the
+// second answers the buffer as it stood, 22 44 55 66 77, 85CFD627; under alignment 2 the
+// second is dropped, 22 33 44 55 66, F018C287 (Visual 2C02). The console's other two
+// outputs, 02 and 32 where the second read's byte goes, are the address byte and a
+// half-settled data byte the CPU catches on the chip's lines, which the chip does not
+// carry (the PPU page's open list); 14 frames.
 TEST(DmcDmaDuringRead4, Double2007Read) {
-  skipNeeding("dmc_dma_during_read4/double_2007_read.nes",
-              "the PPU's read of $2007 on adjacent cycles, which is not built");
+  for (std::uint8_t alignment = 0; alignment < 4; ++alignment) {
+    const char* expected = alignment == 2 ? "F018C287" : "85CFD627";
+    for (const std::uint8_t half : {kGet, kPut}) {
+      const std::optional<std::string> crc =
+          screenCrc("dmc_dma_during_read4/double_2007_read.nes", half, alignment);
+      if (!crc) return;
+      EXPECT_EQ(*crc, expected) << "alignment " << int{alignment} << ", half " << int{half};
+    }
+  }
 }
 
 // "Read of $2007 just before write behaves normally" (its source); 12 frames.

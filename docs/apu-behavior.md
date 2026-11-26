@@ -426,7 +426,7 @@ that reload ([open](#what-remains-open)).
 
 ### A read the fetch lands on is repeated on every halted cycle
 
-Documented and corroborated, with one part the PPU's.
+Documented and corroborated.
 
 On the halt, dummy and alignment cycles of a fetch the halted CPU repeats its read, and the
 read reaches the bus: a register with a read side effect sees it each time.
@@ -435,11 +435,10 @@ The "DMA" page gives the rule under Register conflicts. Each program of `dmc_dma
 states its result at the head of its source. `dma_4016_read`, "DMC DMA during $4016 read
 causes extra $4016 read", prints `08 08 07 08 08` and passes; `dma_2007_write` and
 `read_write_2007` pass; `dma_2007_read`, "DMC DMA during $2007 read causes 2-3 extra $2007
-reads before real read", accepts the CRCs `159A7A8F` and `5E3DF9C4` by alignment, and the
-machine makes three extra reads under every alignment and both halves and prints `5E3DF9C4`.
-The two-read result belongs to what the PPU's port does with reads on adjacent cycles, which
-`double_2007_read` measures with no DMA at all and which is the PPU's to build
-([open](#what-remains-open)).
+reads before real read", accepts the CRCs `159A7A8F` and `5E3DF9C4` by alignment; the machine
+makes three extra reads under every alignment and both halves, and the PPU makes each but,
+under alignment 2, the second of two on adjacent cycles, so the program prints `5E3DF9C4` under
+alignments 0, 1 and 3 and `159A7A8F` under 2 ([the PPU page](ppu.md#the-pins)).
 
 ---
 
@@ -569,9 +568,6 @@ here says it is what a console does.
 - **`2-nmi_and_brk` and the alignment.** The readme of `cpu_interrupts_v2` says the program
   "occasionally fails on NES due to PPU-CPU synchronization"; on the machine it passes under
   alignment 0 and fails under 1, 2 and 3. Which alignments fail on a console is not stated.
-- **Reads of `$2007` on adjacent cycles.** `double_2007_read` and the two-read result of
-  `dma_2007_read` turn on what the PPU's port does there, which the PPU does not build; the
-  machine makes each read whole.
 - **`volume_tests`.** Damian Yerrick's program carries a recording of an NTSC NES-001 playing
   its twelve tones. Its readme states no level for them, and no case compares against the
   recording.

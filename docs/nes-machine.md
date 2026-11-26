@@ -374,7 +374,10 @@ half of the cycle (NESdev wiki, "CPU interrupts", Detailed interrupt behavior):
 | 3 | one: 3 | two: 7 and 11 |
 
 (NESdev wiki, "PPU frame timing", CPU-PPU Clock Alignment; "CPU pinout", M2.) The pattern repeats
-every cycle, twelve being a multiple of four. The access is the CPU's; while the DMA unit holds
+every cycle, twelve being a multiple of four. The dot under way at the access, the one whose four
+master cycles hold master 5, is the dot the PPU takes a `$2007` access in, and the machine hands
+the PPU the master cycle of that dot the access falls on, 1, 0, 3 and 2 under alignments 0 to 3
+([the PPU page](ppu.md#the-pins)). The access is the CPU's; while the DMA unit holds
 the bus it is the OAM transfer's get or put or the DMC's fetch, and on the unit's halt, dummy and
 alignment cycles the halted CPU repeats its read
 ([OAM DMA and the DMC's fetch](#oam-dma-and-the-dmcs-fetch)). Because the APU ticks after the
@@ -1224,8 +1227,9 @@ Every value they assert is read from a document named under [Sources](#sources).
   an `audioRate` of 0 queues none.
 - **The DMC halts the CPU anywhere.** Each sample byte costs three or four cycles on a read cycle
   of the CPU's choosing, and a read of `$2002`, `$2007`, `$4015`, `$4016` or `$4017` the halt
-  lands on is repeated on every halted cycle: `$2007` steps its address two or three extra times
-  and a pad loses a bit.
+  lands on is repeated on every halted cycle: `$2007` is read three extra times, each a read the
+  PPU makes but, under alignment 2, the second of two on adjacent cycles ([the PPU
+  page](ppu.md#the-pins)), and a pad loses a bit.
 - **Set the pad before the frame that reads it.** A pad changed after the strobe's fall is seen
   when the register next fills.
 - **An empty port and a pad with nothing pressed differ.** 0 on every read, against 0 eight times

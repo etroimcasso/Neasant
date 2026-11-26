@@ -89,8 +89,21 @@ struct Chip {
     state.warmingUp = false;
   }
 
-  void write(std::uint8_t port, std::uint8_t value) { ppuWrite(state, port, value, inputs); }
-  std::uint8_t read(std::uint8_t port) { return ppuRead(state, port, inputs); }
+  // A port access. One through $2007 is followed by the five dots to its strobe dot,
+  // where the read loads the buffer or the write lands and `v` steps, so a case reads the
+  // access's effect; the dots themselves are ppu_bus_test's.
+  void write(std::uint8_t port, std::uint8_t value) {
+    ppuWrite(state, port, value, inputs);
+    if (port == 7) settle();
+  }
+  std::uint8_t read(std::uint8_t port) {
+    const std::uint8_t value = ppuRead(state, port, inputs);
+    if (port == 7) settle();
+    return value;
+  }
+  void settle() {
+    for (int dot = 0; dot < 5; ++dot) ppuTickDot(state, false, inputs);
+  }
 
   // Sets the current address through the two writes to $2006.
   void address(std::uint16_t v) {

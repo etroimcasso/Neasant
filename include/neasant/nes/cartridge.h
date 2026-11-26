@@ -138,10 +138,12 @@ struct CpuPins {
 // The PPU side of the connector as the board sees it, once for each dot the chip puts
 // an address on its lines or holds a strobe low. A fetch the chip makes while it renders
 // is presented twice: its address alone, with neither strobe low, and on the next dot
-// its read. An access through $2007 is presented once, with its strobe. The board drives
-// the two CIRAM lines on every presentation and `data` on a read it answers (NESdev
-// wiki, "Cartridge connector", Signal descriptions; "PPU rendering", PPU address bus
-// contents).
+// its read. An access through $2007 is presented likewise, its address alone three dots
+// after the CPU's cycle and its strobe two dots later, a palette write's address alone;
+// and on a dot the chip makes no access on, the lines take `v` and the board is
+// presented the new address when they change. The board drives the two CIRAM lines on
+// every presentation and `data` on a read it answers (NESdev wiki, "Cartridge
+// connector", Signal descriptions; "PPU rendering", PPU address bus contents).
 struct PpuPins {
   std::uint16_t address = 0;  // PA0-PA13; /A13 is bit 13 inverted
   std::uint8_t data = 0;      // PD0-PD7

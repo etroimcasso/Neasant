@@ -422,8 +422,9 @@ TEST(PpuBackground, TheTwoFetchesOfDots337To340AndDot0sAddress) {
 
 // Dot 0 drives the pattern address on scanlines 0-240: after each line of the picture,
 // the last included, and after the pre-render line on a frame that does not skip. The
-// vertical blank's lines and the pre-render line's own dot 0 drive nothing (NESdev wiki,
-// "PPU rendering", Cycle 0 and Pre-render scanline, and its frame timing diagram).
+// vertical blank's lines and the pre-render line's own dot 0 make no access, and the
+// lines carry `v` (NESdev wiki, "PPU rendering", Cycle 0, Pre-render scanline and PPU
+// address bus contents, and its frame timing diagram).
 TEST(PpuBackground, Dot0DrivesItsAddressOnScanlines0To240) {
   const auto driven = [](std::uint16_t scanline) {
     Chip chip;
@@ -436,8 +437,8 @@ TEST(PpuBackground, Dot0DrivesItsAddressOnScanlines0To240) {
   };
   EXPECT_EQ(driven(238), 0x1313);
   EXPECT_EQ(driven(239), 0x1313);
-  EXPECT_EQ(driven(240), 0);
-  EXPECT_EQ(driven(260), 0);
+  EXPECT_EQ(driven(240), 0x3000);
+  EXPECT_EQ(driven(260), 0x3000);
   EXPECT_EQ(driven(261), 0x1313);
 }
 
@@ -525,8 +526,9 @@ TEST(PpuBackground, VsMoveOnADotComesBeforeItsRead) {
 }
 
 // The background runs on scanlines 0-239 and 261: dot 1 of each drives a nametable
-// address, and dot 1 of the post-render line and of the vertical blank's lines drives
-// nothing (NESdev wiki, "PPU rendering", Line-by-line timing).
+// address, and dot 1 of the post-render line and of the vertical blank's lines makes no
+// access, the lines carrying `v` (NESdev wiki, "PPU rendering", Line-by-line timing and
+// PPU address bus contents).
 TEST(PpuBackground, TheBackgroundRunsOnScanlines0To239And261) {
   const auto driven = [](std::uint16_t scanline) {
     Chip chip;
@@ -538,9 +540,9 @@ TEST(PpuBackground, TheBackgroundRunsOnScanlines0To239And261) {
   EXPECT_EQ(driven(0), 0x2005);
   EXPECT_EQ(driven(239), 0x2005);
   EXPECT_EQ(driven(261), 0x2005);
-  EXPECT_EQ(driven(240), 0);
-  EXPECT_EQ(driven(241), 0);
-  EXPECT_EQ(driven(260), 0);
+  EXPECT_EQ(driven(240), 0x0005);
+  EXPECT_EQ(driven(241), 0x0005);
+  EXPECT_EQ(driven(260), 0x0005);
 }
 
 // `v` steps its coarse X on every eighth dot from 8 to 256 and on dots 328 and 336, and
@@ -877,7 +879,7 @@ TEST(PpuBackground, WithRenderingDisabledNothingOfTheBackgroundMoves) {
     EXPECT_EQ(chip.state.patternShift, before.patternShift) << scanline;
     EXPECT_EQ(chip.state.attributeShift, before.attributeShift) << scanline;
     EXPECT_EQ(chip.state.attributeFeed, before.attributeFeed) << scanline;
-    EXPECT_EQ(chip.state.addressPins, before.addressPins) << scanline;
+    EXPECT_EQ(chip.state.addressPins, before.v & 0x3FFFu) << scanline;  // the lines carry v
     EXPECT_EQ(chip.state.addressLatch, before.addressLatch) << scanline;
     EXPECT_EQ(chip.state.pixelPipeline[0], 0) << scanline;
     EXPECT_EQ(chip.state.pixelPipeline[1], 0) << scanline;

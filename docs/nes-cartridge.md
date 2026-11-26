@@ -383,11 +383,13 @@ NAND of M2 and A15, low for `$8000-$FFFF` while the address is stable. On the PP
 presented the 14-bit address, `/RD` and `/WR`, and the data lines, once for each dot the chip puts
 an address on its lines or holds a strobe low. A fetch the chip makes while it renders is two
 presentations, its address alone with neither strobe low and then its read ([the PPU
-page](ppu.md#a-tiles-four-accesses)); an access through `$2007` is one, with its strobe. The board
-drives the two CIRAM lines on every presentation, `CIRAM /CE` enabling the console's 2 KB of
-nametable RAM and `CIRAM A10` selecting which kilobyte, and drives the data lines on a read it
-answers (NESdev wiki, "Cartridge connector", Signal descriptions; "PPU rendering", PPU address bus
-contents).
+page](ppu.md#a-tiles-four-accesses)); an access through `$2007` is two likewise, its address three
+dots after the CPU's cycle and its strobe two dots later, a palette write's address alone ([the PPU
+page](ppu.md#the-pins)); and when the lines take `v` on a dot the chip makes no access on, the new
+address alone. The board drives the two CIRAM lines on every presentation, `CIRAM /CE` enabling the
+console's 2 KB of nametable RAM and `CIRAM A10` selecting which kilobyte, and drives the data lines
+on a read it answers (NESdev wiki, "Cartridge connector", Signal descriptions; "PPU rendering", PPU
+address bus contents).
 
 ```cpp
 struct CpuPins {
@@ -598,7 +600,10 @@ neasant::boardPpuAccess(board, cartridge, right, chrRam);
 - **A PPU access drives the CIRAM lines whether or not the board answers it.** A board answering
   false has still set `ciramEnable` and `ciramA10`.
 - **A fetch is presented twice.** The address alone on its first dot, with `read` and `write` both
-  false, and the read on its second; a board that counts accesses counts the strobes.
+  false, and the read on its second; a board that counts accesses counts the strobes. A `$2007`
+  access is presented the same way, three and five dots after the CPU's cycle, a palette write's
+  address alone; and each new value the lines take while the chip makes no access is presented
+  alone.
 
 ## What remains open
 

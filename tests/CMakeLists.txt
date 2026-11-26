@@ -238,3 +238,18 @@ neasant_add_test(ppu_sprites_test ppu/sprites_test.cpp nes/rom_harness.cpp)
 target_include_directories(ppu_sprites_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)
 target_compile_definitions(ppu_sprites_test PRIVATE
   NEASANT_NES_TEST_ROMS="${NEASANT_NES_TEST_ROMS}")
+
+# The pins to the board: on a bare chip the lines following v while the chip makes no
+# access and the latch keeping its byte, a $2007 read and a write taken in the dot under
+# way and made on the chip's third and fifth dots after it, the palette's write with no
+# strobe and its read underneath, two reads or two writes three dots apart with the first's
+# strobe a dot early and the second dropped when the access falls in the dot's last master
+# cycle, a read and a write keeping their dots, an access on a dot's first master cycle
+# counting a dot more, the warm-up, reset, the lines on the pre-render line's dot 0 and after
+# the post-render line's, address line 13's 43 rises a line with the latch capturing on dot
+# 0, and the pre-render line's sprite fetch rows; on the machine the dot's master cycle an
+# access falls on by the alignment, read through two adjacent reads, and a snapshot carrying
+# an access on its way.
+# The authored-image helpers are the machine tests'.
+neasant_add_test(ppu_bus_test ppu/bus_test.cpp)
+target_include_directories(ppu_bus_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nes)

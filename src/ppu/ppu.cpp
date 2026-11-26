@@ -151,6 +151,106 @@ void stepAddress(PpuState& state) noexcept {
   state.v = static_cast<std::uint16_t>((state.v + step) & 0x7FFFu);
 }
 
+// The chip drives all fourteen address lines with `address`, the console's latch
+// captures the low eight, and the board is presented the address with neither strobe
+// low, the low eight lines carrying the address (NESdev wiki, "PPU rendering", PPU
+// address bus contents; "PPU pinout", Signal descriptions: ALE).
+void driveAddress(PpuState& state, const PpuInputs& inputs, std::uint16_t address) {
+  state.addressPins = address;
+  state.addressLatch = static_cast<std::uint8_t>(address & 0xFFu);
+  PpuPins pins{.address = address, .data = state.addressLatch};
+  static_cast<void>(boardPpuAccess(inputs.board, inputs.cartridge, pins, inputs.chrRam));
+}
+
+// The ticks from a CPU access through $2007 to the dot the chip drives its address and
+// to the dot of its strobe: three and five from the dot under way, one more each when
+// that dot has not ticked yet (Visual 2C02: ALE three dots after the port select falls
+// and /RD or /WR two dots after that, both a dot later when the select falls in a dot's
+// last master cycle).
+constexpr std::uint8_t kDataAccessAddressDots = 3;
+constexpr std::uint8_t kDataAccessStrobeDots = 5;
+
+// Takes a CPU access through $2007 for the chip to make on its own dots. `cycle` is the
+// master cycle of the dot under way the access falls on. An access of the same kind as one
+// standing at its address dot is dropped when the access falls on the dot's last master
+// cycle and otherwise brings that access's strobe a dot nearer; an access of the other kind
+// leaves it alone. With two accesses held a third is dropped, which no sequence on the
+// CPU's bus reaches (Visual 2C02: two reads or two writes on adjacent CPU cycles, the
+// second's ALE three dots after its own select and the first's /RD or /WR on the dot after
+// its ALE; a read and a write on adjacent cycles each on their own dots; the second of two
+// of a kind dropped when its select falls in the third master cycle of the first's ALE
+// dot).
+void takeDataAccess(PpuState& state, PpuDataAccessKind kind, std::uint8_t data,
+                    std::uint8_t cycle) noexcept {
+  const auto extra = static_cast<std::uint8_t>(cycle == 0 ? 1u : 0u);
+  for (PpuDataAccess& held : state.dataAccess) {
+    const auto atItsAddressDot =
+        static_cast<std::uint8_t>(kDataAccessStrobeDots - kDataAccessAddressDots + extra);
+    if (held.kind == kind && held.dotsToStrobe == atItsAddressDot) {
+      if (cycle == 3) return;
+      --held.dotsToStrobe;
+      break;
+    }
+  }
+  for (PpuDataAccess& slot : state.dataAccess) {
+    if (slot.kind == PpuDataAccessKind::None) {
+      slot = PpuDataAccess{
+          .kind = kind,
+          .data = data,
+          .dotsToAddress = static_cast<std::uint8_t>(kDataAccessAddressDots + extra),
+          .dotsToStrobe = static_cast<std::uint8_t>(kDataAccessStrobeDots + extra)};
+      return;
+    }
+  }
+}
+
+// One dot of the $2007 accesses the chip holds: each a tick nearer; on its address dot
+// the lines and the latch take the low fourteen bits of `v` and the board is presented
+// the address alone; on its strobe dot the chip drives the high six lines from `v`
+// again and reads the latched address into the read buffer, held at zero through the
+// warm-up, or writes the byte there, a palette entry taking it with no strobe to the
+// board, and `v` steps. Answers whether a strobe was made, the lines then carrying the
+// data (NESdev wiki, "PPU registers", PPUDATA, The PPUDATA read buffer and Reading
+// palette RAM; "PPU pinout", Signal descriptions: a write to the palette range does not
+// assert /WR; "PPU power up state"; Visual 2C02).
+bool dataAccessDot(PpuState& state, const PpuInputs& inputs) {
+  bool strobed = false;
+  for (PpuDataAccess& held : state.dataAccess) {
+    if (held.kind == PpuDataAccessKind::None) continue;
+    if (held.dotsToAddress != 0 && --held.dotsToAddress == 0) {
+      driveAddress(state, inputs, static_cast<std::uint16_t>(state.v & kAddressMask));
+    }
+    if (--held.dotsToStrobe != 0) continue;
+    state.addressPins =
+        static_cast<std::uint16_t>((state.v & 0x3F00u) | (state.addressPins & 0x00FFu));
+    const auto address = static_cast<std::uint16_t>((state.v & 0x3F00u) | state.addressLatch);
+    if (held.kind == PpuDataAccessKind::Read) {
+      const std::uint8_t byte = busRead(state, address, inputs);
+      state.readBuffer = state.warmingUp ? std::uint8_t{0} : byte;
+    } else if (address >= kPaletteBase) {
+      state.palette[paletteIndex(address)] = static_cast<std::uint8_t>(held.data & 0x3Fu);
+    } else {
+      busWrite(state, address, held.data, inputs);
+    }
+    stepAddress(state);
+    held = PpuDataAccess{};
+    strobed = true;
+  }
+  return strobed;
+}
+
+// On a dot the chip makes no access on, the address lines carry the low fourteen bits
+// of `v`, the board presented the new address when they change; the latch keeps what it
+// captured (NESdev wiki, "PPU rendering", PPU address bus contents; Visual 2C02: the
+// lines take a written `v` with no ALE).
+void followAddress(PpuState& state, const PpuInputs& inputs) {
+  const auto address = static_cast<std::uint16_t>(state.v & kAddressMask);
+  if (state.addressPins == address) return;
+  state.addressPins = address;
+  PpuPins pins{.address = address, .data = static_cast<std::uint8_t>(address & 0xFFu)};
+  static_cast<void>(boardPpuAccess(inputs.board, inputs.cartridge, pins, inputs.chrRam));
+}
+
 // The accesses the chip makes while it renders: the four of a background tile, the
 // nametable fetch whose byte the chip does not keep, and the two pattern bytes of a
 // sprite.
@@ -214,21 +314,24 @@ enum class Fetch : std::uint8_t {
 }
 
 // The address of a sprite's pattern byte for the line, from its slot's Y and tile bytes
-// and its unit's attribute byte. An 8x8 sprite's row is the line less its Y, in the half
-// of the pattern table $2000 bit 3 selects; an 8x16 sprite's sixteen rows are two tiles,
-// the even one and the one after it, in the half bit 0 of its tile byte selects; a
-// vertical flip takes the rows from the bottom; the high byte is eight above the low. The
-// row is the difference's low bits whatever the difference, so a slot holding no sprite
-// for the line, tile $FF, drives an address all the same (NESdev wiki, "PPU pattern
-// tables", Addressing; "PPU OAM", Byte 1 - Tile/index and Byte 2 - Attributes; "PPU
-// rendering", Cycles 257-320).
+// and its unit's attribute byte. An 8x8 sprite's row is the scanline's number less its
+// Y, in the half of the pattern table $2000 bit 3 selects; an 8x16 sprite's sixteen rows
+// are two tiles, the even one and the one after it, in the half bit 0 of its tile byte
+// selects; a vertical flip takes the rows from the bottom; the high byte is eight above
+// the low. The row is the difference's low bits whatever the difference, so a slot
+// holding no sprite for the line, tile $FF, drives an address all the same, and the
+// pre-render line's fetches take 261 for the scanline (NESdev wiki, "PPU pattern tables",
+// Addressing; "PPU OAM", Byte 1 - Tile/index and Byte 2 - Attributes; "PPU rendering",
+// Cycles 257-320; Visual 2C02: the pre-render line's dummy fetches drive the rows 261 less
+// $FF gives, flipped).
 [[nodiscard]] std::uint16_t spriteAddress(const PpuState& state, std::size_t slot,
                                           bool high) noexcept {
   const std::uint8_t y = state.secondaryOam[slot * 4];
   const std::uint8_t tile = state.secondaryOam[slot * 4 + 1];
   const std::uint8_t attribute = state.spriteUnits[slot].attribute;
   const auto last = static_cast<unsigned>(spriteHeight(state) - 1);
-  unsigned row = static_cast<unsigned>(spriteLine(state) - static_cast<int>(y)) & last;
+  unsigned row =
+      static_cast<unsigned>(static_cast<int>(state.scanline) - static_cast<int>(y)) & last;
   if ((attribute & 0x80u) != 0) row ^= last;
   const unsigned byte = high ? 0x08u : 0u;
   if (last == 15u) {
@@ -323,10 +426,8 @@ void moveV(PpuState& state, std::uint16_t dot, bool preRender) noexcept {
 // high bits dot 257 reloads (NESdev wiki, "PPU rendering", PPU address bus contents, and
 // Cycles 257-320: the first garbage nametable fetch; "PPU pinout", Signal descriptions).
 void addressDot(PpuState& state, const PpuInputs& inputs, Fetch fetch, std::uint8_t low) {
-  state.addressPins = static_cast<std::uint16_t>((fetchAddress(state, fetch) & 0x3F00u) | low);
-  state.addressLatch = low;
-  PpuPins pins{.address = state.addressPins, .data = low};
-  static_cast<void>(boardPpuAccess(inputs.board, inputs.cartridge, pins, inputs.chrRam));
+  driveAddress(state, inputs,
+               static_cast<std::uint16_t>((fetchAddress(state, fetch) & 0x3F00u) | low));
 }
 
 // A byte with its bits reversed. A pattern byte's bit 7 is the tile's leftmost pixel,
@@ -662,6 +763,8 @@ void ppuReset(PpuState& state) noexcept {
   state.x = 0;
   state.w = false;
   state.readBuffer = 0;
+  // The line is held for far longer than a $2007 access takes to its strobe dot.
+  state.dataAccess = {};
   state.warmingUp = true;
   state.dot = 0;
   state.scanline = 0;
@@ -734,18 +837,11 @@ void ppuWrite(PpuState& state, std::uint8_t port, std::uint8_t value, const PpuI
         state.w = false;
       }
       return;
-    default: {
+    default:
       // NESdev wiki, "PPU registers", PPUDATA: the write lands at the current address
-      // and the address steps. A palette entry keeps six bits (Reading palette RAM).
-      const auto address = static_cast<std::uint16_t>(state.v & kAddressMask);
-      if (address >= kPaletteBase) {
-        state.palette[paletteIndex(address)] = static_cast<std::uint8_t>(value & 0x3Fu);
-      } else {
-        busWrite(state, address, value, inputs);
-      }
-      stepAddress(state);
+      // and the address steps, on the chip's own dots (dataAccessDot).
+      takeDataAccess(state, PpuDataAccessKind::Write, value, inputs.accessCycle);
       return;
-    }
   }
 }
 
@@ -778,21 +874,17 @@ std::uint8_t ppuRead(PpuState& state, std::uint8_t port, const PpuInputs& inputs
       std::uint8_t value;
       if (address >= kPaletteBase) {
         // NESdev wiki, "PPU registers", Reading palette RAM: the entry is answered at
-        // once under the I/O bus's top two bits, which stay as they are, and the read
-        // the chip makes underneath at the same address fills the read buffer.
+        // once under the I/O bus's top two bits, which stay as they are.
         value = static_cast<std::uint8_t>((state.ioLatch & 0xC0u) | paletteRead(state, address));
         driveBus(state, value, 0x3F, inputs);
       } else {
-        // NESdev wiki, "PPU registers", The PPUDATA read buffer: the buffer is answered
-        // and refilled from the current address.
+        // NESdev wiki, "PPU registers", The PPUDATA read buffer: the buffer is answered.
         value = state.readBuffer;
         driveBus(state, value, 0xFF, inputs);
       }
-      state.readBuffer = busRead(state, address, inputs);
-      // NESdev wiki, "PPU power up state": the internal reset signal holds the read
-      // buffer cleared while it stands.
-      if (state.warmingUp) state.readBuffer = 0;
-      stepAddress(state);
+      // The read the chip makes, which refills the buffer and steps the address, comes
+      // on its own dots (dataAccessDot).
+      takeDataAccess(state, PpuDataAccessKind::Read, 0, inputs.accessCycle);
       return value;
     }
     default:
@@ -827,8 +919,9 @@ PpuDotEvent ppuTickDot(PpuState& state, bool statusRead, const PpuInputs& inputs
   // step; the flags and the warm-up at dot 1; the rendered dot, which selects the pixel
   // of the position two dots behind from the background's registers and the sprites'
   // units, shifts, reloads, moves `v`, makes its half of an access and does the sprites'
-  // work on OAM; the picture's position, drawn from the pixel selected two dots ago, and
-  // that pixel's successors moved a place; the I/O bus's decay.
+  // work on OAM; the dots of the $2007 accesses the chip holds, and the lines following
+  // `v` on a dot with no access; the picture's position, drawn from the pixel selected
+  // two dots ago, and that pixel's successors moved a place; the I/O bus's decay.
   //
   // A write to $2001 comes a dot closer to the frame counter; the dot that takes the
   // count to zero reads the write.
@@ -882,6 +975,17 @@ PpuDotEvent ppuTickDot(PpuState& state, bool statusRead, const PpuInputs& inputs
   // reads rendering enabled.
   const std::uint8_t selected =
       renderingAtTheCounter(state) ? renderDot(state, inputs, skipped) : std::uint8_t{0};
+  // The $2007 accesses the chip holds take their dots, and on a dot with no access of the
+  // fetch circuit's and no strobe the lines follow `v` (NESdev wiki, "PPU rendering", PPU
+  // address bus contents; Visual 2C02: the lines carry `v` on dot 0 of the pre-render
+  // line).
+  const bool fetching =
+      renderingAtTheCounter(state) &&
+      (state.scanline <= kLastPictureLine ||
+       (state.scanline == kPreRenderScanline && state.dot != 0) ||
+       (state.scanline == kPostRenderScanline && state.dot == 0));
+  const bool strobed = dataAccessDot(state, inputs);
+  if (!fetching && !strobed) followAddress(state, inputs);
   // NESdev wiki, "PPU rendering", Drawing overview and Cycles 1-256, and its frame timing
   // diagram's notes: the dot resolves the picture position four dots behind the counter,
   // from the pixel selected two dots behind it, whether or not anything stores it; the

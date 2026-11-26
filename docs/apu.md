@@ -1267,23 +1267,24 @@ the config's defaults and run a frame at a time until it reports, as
 repository collects them, 47 ROM files, and Fiskbit's two `dmc_dma_start_test` programs and
 Damian Yerrick's `dpcmletterbox` from their own archives.
 
-Of the APU's 47, 40 pass; `apu_test.nes` and `cpu_interrupts.nes`, the multi-test builds on mapper
-1, skip naming the mapper; `double_2007_read`, which reads `$2007` on two adjacent cycles with no
-DMA, skips naming the PPU's port; `dmc_tests`'s four, which carry no readme or source, skip naming
-the description they lack. `dpcmletterbox`, whose NMI handler waits for the sprite 0 hit at the top
-of the picture and then times the frame by the DMC's interrupt, takes twenty interrupt sequences a
-frame, the measured playback's and nineteen of its chain, counted through the bus observer from its
-fourth frame under either half. Fiskbit's 21 cases are measured through the bus observer as the
-cycles between the two `$2001` writes that bound each greyscale region and the deleted-bit counters
-in RAM, and every one gives the figure his readme measures on an RP2A03H. `apu_mixer`'s four report
-by sound: each plays a beep, a test tone its DMC level cancels, and a beep, and its case drains the
-frames a picture at a time and pins where the two beeps fall and, between them, the level and the
-tone in thousandths of the beeps' own: 22 and 10 for `square`, 15 and 7 for `triangle`, 18 and 8 for
-`dmc`, and 130 and 13 for `noise`, whose readme has its noise fade in and out with no tone.
-`2-nmi_and_brk`, whose readme says it "occasionally fails on NES due to PPU-CPU synchronization",
-passes under alignment 0, the default, and fails under 1, 2 and 3. Every APU program passes under
-either `apuPhase`; the mixer programs' figures are the default's, and under the other half `square`
-gives 14 and 7 and `dmc` 12 and 6.
+Of the APU's 47, 41 pass; `apu_test.nes` and `cpu_interrupts.nes`, the multi-test builds on mapper
+1, skip naming the mapper; `dmc_tests`'s four, which carry no readme or source, skip naming the
+description they lack. `dma_2007_read` and `double_2007_read` print the CRCs their sources list by
+alignment, `5E3DF9C4` and `85CFD627` under alignments 0, 1 and 3 and `159A7A8F` and `F018C287` under
+2, under either half ([the PPU page](ppu.md#the-pins)). `dpcmletterbox`, whose NMI handler waits for
+the sprite 0 hit at the top of the picture and then times the frame by the DMC's interrupt, takes
+twenty interrupt sequences a frame, the measured playback's and nineteen of its chain, counted
+through the bus observer from its fourth frame under either half. Fiskbit's 21 cases are measured
+through the bus observer as the cycles between the two `$2001` writes that bound each greyscale
+region and the deleted-bit counters in RAM, and every one gives the figure his readme measures on an
+RP2A03H. `apu_mixer`'s four report by sound: each plays a beep, a test tone its DMC level cancels,
+and a beep, and its case drains the frames a picture at a time and pins where the two beeps fall
+and, between them, the level and the tone in thousandths of the beeps' own: 22 and 10 for `square`,
+15 and 7 for `triangle`, 18 and 8 for `dmc`, and 130 and 13 for `noise`, whose readme has its noise
+fade in and out with no tone. `2-nmi_and_brk`, whose readme says it "occasionally fails on NES due
+to PPU-CPU synchronization", passes under alignment 0, the default, and fails under 1, 2 and 3.
+Every APU program passes under either `apuPhase`; the mixer programs' figures are the default's, and
+under the other half `square` gives 14 and 7 and `dmc` 12 and 6.
 
 `NEASANT_DMC_PROGRAMS_DIR` points at a directory holding `dmc_dma_start_test/`,
 `dmc_dma_start_test_v2/` and `dpcmletterbox/`, each with its ROM, and

@@ -296,6 +296,15 @@ void Nes::reportSave() {
   saveObserver_->changed(state_.prgRam);
 }
 
+// The access is kMasterCyclesToM2Rise into the cycle and `dotClock` is the first dot at
+// or after it, so the dot under way began four master cycles before `dotClock`, or is
+// the dot at `dotClock` itself when the access falls as it begins (NESdev wiki, "PPU
+// frame timing", CPU-PPU Clock Alignment; "CPU pinout", M2).
+std::uint8_t Nes::accessCycle() const noexcept {
+  return static_cast<std::uint8_t>(
+      (state_.master + kMasterCyclesToM2Rise + kMasterCyclesPerDot - state_.dotClock) & 3u);
+}
+
 PpuInputs Nes::ppuInputs() noexcept {
   return PpuInputs{state_.board, cartridge_, state_.chrRam,
                    static_cast<std::uint32_t>(ppuOpenBusDecay_ / kMasterCyclesPerDot),
@@ -373,7 +382,8 @@ std::uint8_t Nes::busRead(std::uint16_t address, CycleKind kind, AccessSource so
     case Target::Ppu: {
       // NESdev wiki, "CPU memory map": the eight ports repeat every eight bytes.
       const auto port = static_cast<std::uint8_t>(address & 0x0007u);
-      const PpuInputs inputs = ppuInputs();
+      PpuInputs inputs = ppuInputs();
+      inputs.accessCycle = accessCycle();
       value = ppuRead(state_.ppu, port, inputs);
       statusRead_ = port == 2;
       break;
@@ -425,7 +435,8 @@ void Nes::busWrite(std::uint16_t address, std::uint8_t value, CycleKind kind,
       state_.ram[address & 0x07FFu] = value;
       break;
     case Target::Ppu: {
-      const PpuInputs inputs = ppuInputs();
+      PpuInputs inputs = ppuInputs();
+      inputs.accessCycle = accessCycle();
       ppuWrite(state_.ppu, static_cast<std::uint8_t>(address & 0x0007u), value, inputs);
       break;
     }

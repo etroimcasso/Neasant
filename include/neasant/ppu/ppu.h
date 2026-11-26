@@ -47,6 +47,30 @@ struct SpriteUnit {
   [[nodiscard]] bool operator==(const SpriteUnit&) const noexcept = default;
 };
 
+// What a CPU access through $2007 is on its way to the chip's address space: a read or a
+// write, or no access held.
+enum class PpuDataAccessKind : std::uint8_t { None, Read, Write };
+
+// A CPU access through $2007 that the chip has taken and not yet made. The chip takes the
+// access in the dot under way and makes it on its own dots: the address dot, three dots
+// on, where the address lines take `v`, the console's latch captures its low byte and
+// the board is presented the address alone; and the strobe dot, two dots after that,
+// where a read loads the read buffer from the latched address or a write lands there,
+// and `v` steps. `data` is the byte a write carries; `dotsToAddress` and `dotsToStrobe`
+// are the ticks still to go to each dot. A second access of the same kind taken on the
+// first's address dot brings the first's strobe a dot nearer, or is dropped when it
+// falls in that dot's last master cycle; an access of the other kind leaves the first as
+// it is (Visual 2C02: ALE three dots after the port select falls and /RD or /WR two dots
+// after that; NESdev wiki, "PPU registers", The PPUDATA read buffer: the chip's read is
+// too slow to serve the CPU's).
+struct PpuDataAccess {
+  PpuDataAccessKind kind = PpuDataAccessKind::None;
+  std::uint8_t data = 0;
+  std::uint8_t dotsToAddress = 0;
+  std::uint8_t dotsToStrobe = 0;
+  [[nodiscard]] bool operator==(const PpuDataAccess&) const noexcept = default;
+};
+
 // The chip's whole mutable state as a value: snapshot by copy, restore by assignment.
 struct PpuState {
   // $2000 as last written: bit 7 enables the NMI output, bit 5 makes every sprite 8x16,
@@ -100,8 +124,8 @@ struct PpuState {
   std::uint16_t t = 0;
   std::uint8_t x = 0;
   bool w = false;
-  // The byte the next read of $2007 answers, loaded by the read before it (NESdev
-  // wiki, "PPU registers", The PPUDATA read buffer).
+  // The byte the next read of $2007 answers, loaded on the strobe dot of the read before
+  // it (NESdev wiki, "PPU registers", The PPUDATA read buffer).
   std::uint8_t readBuffer = 0;
   // The PPU's I/O bus: the byte every port write loads and every read of a write-only
   // port answers; a read of $2002 loads its bits 7-5, a read of $2004 or of $2007
@@ -175,15 +199,19 @@ struct PpuState {
   // shifters first shift on cycle 2, where sprite 0 hit takes the image to start, and
   // the first pixel is output during cycle 4).
   std::array<std::uint8_t, 2> pixelPipeline{};
-  // The address lines as the fetch circuit last drove them, and the console's address
-  // latch. On the first dot of an access the chip drives all fourteen lines and the
-  // latch captures the low eight; on the second the low eight lines carry the data, the
-  // chip drives the high six, and the cartridge and the nametable RAM are addressed by
-  // those six over the latch. `addressPins` keeps its low eight bits as an address last
-  // put them (NESdev wiki, "PPU rendering", PPU address bus contents; "PPU pinout",
-  // Signal descriptions).
+  // The address lines as the chip last drove them, and the console's address latch. On
+  // the first dot of an access the chip drives all fourteen lines and the latch captures
+  // the low eight; on the second the low eight lines carry the data, the chip drives the
+  // high six, and the cartridge and the nametable RAM are addressed by those six over the
+  // latch. On a dot the chip makes no access on, the lines carry the low fourteen bits
+  // of `v` and the latch keeps what it captured. `addressPins` keeps its low eight bits
+  // as an address last put them (NESdev wiki, "PPU rendering", PPU address bus contents;
+  // "PPU pinout", Signal descriptions).
   std::uint16_t addressPins = 0;
   std::uint8_t addressLatch = 0;
+  // The $2007 accesses the chip has taken and not yet made, two at most, each in the
+  // first entry free when it was taken; an entry whose kind is None holds nothing.
+  std::array<PpuDataAccess, 2> dataAccess{};
   // Secondary OAM, the 32 bytes a line's evaluation fills with the next line's sprites,
   // four bytes each in OAM's order, cleared to $FF on dots 1-64 and read into the output
   // units on dots 257-320. `secondaryAddress` is the byte the next copied byte goes to,
@@ -218,15 +246,21 @@ struct PpuState {
 // What the chip reaches through and does not hold: the board with its cartridge, for
 // the PPU's address space; the CHR RAM the board writes; the dots a bit of the I/O bus
 // holds its charge after an access drives it, from the machine's config, 0 holding it
-// for ever; and the picture's storage, kPictureDots entries the chip writes each dot's
+// for ever; the picture's storage, kPictureDots entries the chip writes each dot's
 // value into as it resolves the dot, or empty, with which the chip resolves every dot,
-// stores none, and runs exactly as it does with the storage.
+// stores none, and runs exactly as it does with the storage; and the master cycle of
+// the dot under way that a CPU access to a port falls on, 0 to 3, which the machine
+// takes from its alignment and a bare chip's caller leaves at 1: at 0 the dot has not
+// ticked yet and a $2007 access counts one tick more to each of its dots, and at 3 a
+// $2007 access of the same kind as one standing at its address dot is dropped
+// (PpuDataAccess).
 struct PpuInputs {
   Board& board;
   const Cartridge& cartridge;
   std::span<std::uint8_t> chrRam;
   std::uint32_t busDecayDots;
   std::span<std::uint16_t> picture{};
+  std::uint8_t accessCycle = 1;
 };
 
 // What a dot was, beyond one more of the frame: the dot that resolved the picture's
@@ -237,29 +271,32 @@ enum class PpuDotEvent : std::uint8_t { None, PictureBegun, VerticalBlank, Frame
 
 // The chip after the reset line: $2000, $2001 with any write of it still short of the
 // frame counter, the temporary address, the fine X scroll, the write toggle and the read
-// buffer cleared, the counter at dot 0 of scanline 0 of an even frame, and the warm-up
-// window open; the vertical-blank, sprite 0 hit and sprite overflow flags, the OAM
-// address, the current address, the I/O bus with its decay, the fetch latches, the shift
-// registers, the pixels on their way to the picture, the address lines, secondary OAM
-// with the evaluation's place, the OAM bus, the sprite 0 flags, the output units and
-// every memory keep what they hold (NESdev wiki, "PPU power up state", Initial Register
-// Values, the After Reset column and the note on the internal reset signal).
+// buffer cleared, any $2007 access on its way dropped, the counter at dot 0 of scanline 0
+// of an even frame, and the warm-up window open; the vertical-blank, sprite 0 hit and
+// sprite overflow flags, the OAM address, the current address, the I/O bus with its
+// decay, the fetch latches, the shift registers, the pixels on their way to the picture,
+// the address lines, secondary OAM with the evaluation's place, the OAM bus, the sprite 0
+// flags, the output units and every memory keep what they hold (NESdev wiki, "PPU power
+// up state", Initial Register Values, the After Reset column and the note on the internal
+// reset signal).
 void ppuReset(PpuState& state) noexcept;
 
 // A CPU write to port `port`, 0-7, the address's low three bits. Every write loads the
 // I/O bus whole. $2000, $2001, $2005 and $2006 then take the value as PpuState says,
 // unless the warm-up window stands; $2003 sets the OAM address; $2004 stores at the OAM
-// address and steps it; $2007 writes through the chip's address space at `v` and
-// steps `v`; a write to $2002 loads the bus and nothing else.
+// address and steps it; $2007 takes a write through the chip's address space at `v`,
+// which the chip makes on its own dots and steps `v` with (PpuDataAccess); a write to
+// $2002 loads the bus and nothing else.
 void ppuWrite(PpuState& state, std::uint8_t port, std::uint8_t value, const PpuInputs& inputs);
 
 // A CPU read of port `port`. $2002 answers the vertical-blank flag in bit 7, the sprite 0
 // hit flag in bit 6 and the sprite overflow flag in bit 5 over the I/O bus's low five
 // bits, then clears the vertical-blank flag and the write toggle; $2004 answers the OAM
 // byte at the OAM address, a sprite's byte 2 with bits 4-2 clear, or the byte on the
-// chip's OAM bus while the chip renders; $2007 answers the read buffer and refills it
-// from the chip's address space at `v`, or answers a palette entry at once under the
-// bus's top two bits, and steps `v`; every other port answers the I/O bus as it stands.
+// chip's OAM bus while the chip renders; $2007 answers the read buffer, or a palette
+// entry at once under the bus's top two bits, and takes a read through the chip's
+// address space at `v`, which the chip makes on its own dots, refilling the buffer and
+// stepping `v` (PpuDataAccess); every other port answers the I/O bus as it stands.
 [[nodiscard]] std::uint8_t ppuRead(PpuState& state, std::uint8_t port, const PpuInputs& inputs);
 
 // What a read of port `port` would answer, with nothing moved: the flag, the toggle,
@@ -298,6 +335,14 @@ void ppuWrite(PpuState& state, std::uint8_t port, std::uint8_t value, const PpuI
 // background's in the priority multiplexer, and sprite 0 hit is set where both are
 // opaque with sprite 0 in the first unit, at every position but 255.
 //
+// Makes the dots of the $2007 accesses the chip holds: on an access's address dot
+// drives the lines and the latch from `v` and presents the board the address alone; on
+// its strobe dot reads the latched address into the read buffer, held at zero through
+// the warm-up, or writes the byte there, a palette entry taking it with no strobe to
+// the board, and steps `v`. On a dot that makes no access, the lines take `v` as it
+// stands and the board is presented the new address when they change; the accesses are
+// a fetch's two dots, dot 0 of scanlines 0-240 and a $2007 access's two.
+//
 // Resolves the picture's position for the dot on dots 4-259 of scanlines 0-239, and
 // stores it when `inputs` carries the picture: position x of line y on dot x + 4 of
 // scanline y. With rendering enabled its value is the multiplexer's pixel, selected two
@@ -312,7 +357,8 @@ void ppuWrite(PpuState& state, std::uint8_t port, std::uint8_t value, const PpuI
 // rendering", Drawing overview, Rendering disabled, Line-by-line timing and PPU address
 // bus contents, and its frame timing diagram with its notes; "PPU scrolling", Register
 // controls and Wrapping around; "PPU palettes", Backdrop override; "PPU OAM"; "PPU
-// sprite evaluation"; "PPU sprite priority".
+// sprite evaluation"; "PPU sprite priority"; "PPU pinout", Signal descriptions; Visual
+// 2C02.
 PpuDotEvent ppuTickDot(PpuState& state, bool statusRead, const PpuInputs& inputs);
 
 // The chip's NMI output, true while it is pulled low: the vertical-blank flag set and

@@ -36,6 +36,7 @@ The status table in the [README](../README.md) is the component's status row.
   - [Its decay](#its-decay)
 - [The address space](#the-address-space)
   - [The palette](#the-palette)
+- [The pins](#the-pins)
 - [The frame](#the-frame)
   - [The odd-frame skip](#the-odd-frame-skip)
   - [The machine's frame](#the-machines-frame)
@@ -77,29 +78,32 @@ to.
 ```cpp
 // The chip after the reset line: $2000, $2001 with any write of it still short of the
 // frame counter, the temporary address, the fine X scroll, the write toggle and the read
-// buffer cleared, the counter at dot 0 of scanline 0 of an even frame, and the warm-up
-// window open; the vertical-blank, sprite 0 hit and sprite overflow flags, the OAM
-// address, the current address, the I/O bus with its decay, the fetch latches, the shift
-// registers, the pixels on their way to the picture, the address lines, secondary OAM
-// with the evaluation's place, the OAM bus, the sprite 0 flags, the output units and
-// every memory keep what they hold (NESdev wiki, "PPU power up state", Initial Register
-// Values, the After Reset column and the note on the internal reset signal).
+// buffer cleared, any $2007 access on its way dropped, the counter at dot 0 of scanline 0
+// of an even frame, and the warm-up window open; the vertical-blank, sprite 0 hit and
+// sprite overflow flags, the OAM address, the current address, the I/O bus with its
+// decay, the fetch latches, the shift registers, the pixels on their way to the picture,
+// the address lines, secondary OAM with the evaluation's place, the OAM bus, the sprite 0
+// flags, the output units and every memory keep what they hold (NESdev wiki, "PPU power
+// up state", Initial Register Values, the After Reset column and the note on the internal
+// reset signal).
 void ppuReset(PpuState& state) noexcept;
 
 // A CPU write to port `port`, 0-7, the address's low three bits. Every write loads the
 // I/O bus whole. $2000, $2001, $2005 and $2006 then take the value as PpuState says,
 // unless the warm-up window stands; $2003 sets the OAM address; $2004 stores at the OAM
-// address and steps it; $2007 writes through the chip's address space at `v` and
-// steps `v`; a write to $2002 loads the bus and nothing else.
+// address and steps it; $2007 takes a write through the chip's address space at `v`,
+// which the chip makes on its own dots and steps `v` with (PpuDataAccess); a write to
+// $2002 loads the bus and nothing else.
 void ppuWrite(PpuState& state, std::uint8_t port, std::uint8_t value, const PpuInputs& inputs);
 
 // A CPU read of port `port`. $2002 answers the vertical-blank flag in bit 7, the sprite 0
 // hit flag in bit 6 and the sprite overflow flag in bit 5 over the I/O bus's low five
 // bits, then clears the vertical-blank flag and the write toggle; $2004 answers the OAM
 // byte at the OAM address, a sprite's byte 2 with bits 4-2 clear, or the byte on the
-// chip's OAM bus while the chip renders; $2007 answers the read buffer and refills it
-// from the chip's address space at `v`, or answers a palette entry at once under the
-// bus's top two bits, and steps `v`; every other port answers the I/O bus as it stands.
+// chip's OAM bus while the chip renders; $2007 answers the read buffer, or a palette
+// entry at once under the bus's top two bits, and takes a read through the chip's
+// address space at `v`, which the chip makes on its own dots, refilling the buffer and
+// stepping `v` (PpuDataAccess); every other port answers the I/O bus as it stands.
 [[nodiscard]] std::uint8_t ppuRead(PpuState& state, std::uint8_t port, const PpuInputs& inputs);
 
 // What a read of port `port` would answer, with nothing moved: the flag, the toggle,
@@ -138,6 +142,14 @@ void ppuWrite(PpuState& state, std::uint8_t port, std::uint8_t value, const PpuI
 // background's in the priority multiplexer, and sprite 0 hit is set where both are
 // opaque with sprite 0 in the first unit, at every position but 255.
 //
+// Makes the dots of the $2007 accesses the chip holds: on an access's address dot
+// drives the lines and the latch from `v` and presents the board the address alone; on
+// its strobe dot reads the latched address into the read buffer, held at zero through
+// the warm-up, or writes the byte there, a palette entry taking it with no strobe to
+// the board, and steps `v`. On a dot that makes no access, the lines take `v` as it
+// stands and the board is presented the new address when they change; the accesses are
+// a fetch's two dots, dot 0 of scanlines 0-240 and a $2007 access's two.
+//
 // Resolves the picture's position for the dot on dots 4-259 of scanlines 0-239, and
 // stores it when `inputs` carries the picture: position x of line y on dot x + 4 of
 // scanline y. With rendering enabled its value is the multiplexer's pixel, selected two
@@ -152,7 +164,8 @@ void ppuWrite(PpuState& state, std::uint8_t port, std::uint8_t value, const PpuI
 // rendering", Drawing overview, Rendering disabled, Line-by-line timing and PPU address
 // bus contents, and its frame timing diagram with its notes; "PPU scrolling", Register
 // controls and Wrapping around; "PPU palettes", Backdrop override; "PPU OAM"; "PPU
-// sprite evaluation"; "PPU sprite priority".
+// sprite evaluation"; "PPU sprite priority"; "PPU pinout", Signal descriptions; Visual
+// 2C02.
 PpuDotEvent ppuTickDot(PpuState& state, bool statusRead, const PpuInputs& inputs);
 
 // The chip's NMI output, true while it is pulled low: the vertical-blank flag set and
@@ -165,9 +178,11 @@ PpuDotEvent ppuTickDot(PpuState& state, bool statusRead, const PpuInputs& inputs
 What the chip reaches through and does not hold is handed in as `PpuInputs`: the board with its
 cartridge, for the chip's address space; the CHR RAM the board writes; the dots a bit of the I/O
 bus holds its charge after an access drives it, from the machine's config, 0 holding it for
-ever; and the picture's storage, `kPictureDots` entries the chip writes each dot's value into as
-it resolves the dot, or empty, with which the chip resolves every dot, stores none, and runs
-exactly as it does with the storage ([The picture](#the-picture)).
+ever; the picture's storage, `kPictureDots` entries the chip writes each dot's value into as it
+resolves the dot, or empty, with which the chip resolves every dot, stores none, and runs exactly
+as it does with the storage ([The picture](#the-picture)); and the master cycle of the dot under
+way that a CPU access to a port falls on, 0 to 3, which the machine takes from its alignment and
+a bare chip's caller leaves at 1 ([The pins](#the-pins)).
 
 ```cpp
 struct PpuInputs {
@@ -176,6 +191,7 @@ struct PpuInputs {
   std::span<std::uint8_t> chrRam;
   std::uint32_t busDecayDots;
   std::span<std::uint16_t> picture{};
+  std::uint8_t accessCycle = 1;
 };
 ```
 
@@ -224,7 +240,8 @@ Every later example on this page uses this `programImage` and needs no further `
 ## The state value
 
 `PpuState` is the chip's whole mutable state as a value: snapshot by copy, restore by assignment;
-`SpriteUnit` is one of the eight output units it holds.
+`SpriteUnit` is one of the eight output units it holds and `PpuDataAccess` a `$2007` access it has
+taken and not yet made ([The pins](#the-pins)).
 
 ```cpp
 // One sprite output unit: the two 8-bit shift registers holding its row, [0] the pixels'
@@ -241,6 +258,30 @@ struct SpriteUnit {
   std::uint8_t attribute = 0;
   std::uint8_t x = 0;
   [[nodiscard]] bool operator==(const SpriteUnit&) const noexcept = default;
+};
+
+// What a CPU access through $2007 is on its way to the chip's address space: a read or a
+// write, or no access held.
+enum class PpuDataAccessKind : std::uint8_t { None, Read, Write };
+
+// A CPU access through $2007 that the chip has taken and not yet made. The chip takes the
+// access in the dot under way and makes it on its own dots: the address dot, three dots
+// on, where the address lines take `v`, the console's latch captures its low byte and
+// the board is presented the address alone; and the strobe dot, two dots after that,
+// where a read loads the read buffer from the latched address or a write lands there,
+// and `v` steps. `data` is the byte a write carries; `dotsToAddress` and `dotsToStrobe`
+// are the ticks still to go to each dot. A second access of the same kind taken on the
+// first's address dot brings the first's strobe a dot nearer, or is dropped when it
+// falls in that dot's last master cycle; an access of the other kind leaves the first as
+// it is (Visual 2C02: ALE three dots after the port select falls and /RD or /WR two dots
+// after that; NESdev wiki, "PPU registers", The PPUDATA read buffer: the chip's read is
+// too slow to serve the CPU's).
+struct PpuDataAccess {
+  PpuDataAccessKind kind = PpuDataAccessKind::None;
+  std::uint8_t data = 0;
+  std::uint8_t dotsToAddress = 0;
+  std::uint8_t dotsToStrobe = 0;
+  [[nodiscard]] bool operator==(const PpuDataAccess&) const noexcept = default;
 };
 
 // The chip's whole mutable state as a value: snapshot by copy, restore by assignment.
@@ -296,8 +337,8 @@ struct PpuState {
   std::uint16_t t = 0;
   std::uint8_t x = 0;
   bool w = false;
-  // The byte the next read of $2007 answers, loaded by the read before it (NESdev
-  // wiki, "PPU registers", The PPUDATA read buffer).
+  // The byte the next read of $2007 answers, loaded on the strobe dot of the read before
+  // it (NESdev wiki, "PPU registers", The PPUDATA read buffer).
   std::uint8_t readBuffer = 0;
   // The PPU's I/O bus: the byte every port write loads and every read of a write-only
   // port answers; a read of $2002 loads its bits 7-5, a read of $2004 or of $2007
@@ -371,15 +412,19 @@ struct PpuState {
   // shifters first shift on cycle 2, where sprite 0 hit takes the image to start, and
   // the first pixel is output during cycle 4).
   std::array<std::uint8_t, 2> pixelPipeline{};
-  // The address lines as the fetch circuit last drove them, and the console's address
-  // latch. On the first dot of an access the chip drives all fourteen lines and the
-  // latch captures the low eight; on the second the low eight lines carry the data, the
-  // chip drives the high six, and the cartridge and the nametable RAM are addressed by
-  // those six over the latch. `addressPins` keeps its low eight bits as an address last
-  // put them (NESdev wiki, "PPU rendering", PPU address bus contents; "PPU pinout",
-  // Signal descriptions).
+  // The address lines as the chip last drove them, and the console's address latch. On
+  // the first dot of an access the chip drives all fourteen lines and the latch captures
+  // the low eight; on the second the low eight lines carry the data, the chip drives the
+  // high six, and the cartridge and the nametable RAM are addressed by those six over the
+  // latch. On a dot the chip makes no access on, the lines carry the low fourteen bits
+  // of `v` and the latch keeps what it captured. `addressPins` keeps its low eight bits
+  // as an address last put them (NESdev wiki, "PPU rendering", PPU address bus contents;
+  // "PPU pinout", Signal descriptions).
   std::uint16_t addressPins = 0;
   std::uint8_t addressLatch = 0;
+  // The $2007 accesses the chip has taken and not yet made, two at most, each in the
+  // first entry free when it was taken; an entry whose kind is None holds nothing.
+  std::array<PpuDataAccess, 2> dataAccess{};
   // Secondary OAM, the 32 bytes a line's evaluation fills with the next line's sprites,
   // four bytes each in OAM's order, cleared to $FF on dots 1-64 and read into the output
   // units on dots 257-320. `secondaryAddress` is the byte the next copied byte goes to,
@@ -423,11 +468,12 @@ inline constexpr std::uint16_t kScanlinesPerFrame = 262;
 `ctrl` and `mask` are `$2000` and `$2001` as last written, and `maskBefore` and `maskLag` carry a
 `$2001` write to the frame counter; `v`, `t`, `x` and `w` are the scroll file the "PPU scrolling"
 page names; the I/O bus and its eight decay counts, the warm-up window, the counter's dot, scanline
-and parity, and the three memories follow; the fetch latches, the shift registers, the two pixels on
-their way to the picture and the address lines with the console's latch are [the
-background's](#the-background); and secondary OAM with the evaluation's place, the OAM bus, the two
-sprite 0 marks and the output units are [the sprites'](#the-sprites). Every field is plain, so a
-snapshot taken on any dot of any line restores to the same place.
+and parity, and the three memories follow; the fetch latches, the shift registers and the two pixels
+on their way to the picture are [the background's](#the-background); the address lines with the
+console's latch and the `$2007` accesses on their way are [the pins'](#the-pins); and secondary OAM
+with the evaluation's place, the OAM bus, the two sprite 0 marks and the output units are [the
+sprites'](#the-sprites). Every field is plain, so a snapshot taken on any dot of any line restores
+to the same place.
 
 ## The ports
 
@@ -443,7 +489,7 @@ bits. Every write loads the I/O bus whole, and every read of a write-only port a
 | `$2004` | the OAM byte at the address, which then steps | the OAM byte at the address, a sprite's byte 2 with bits 4–2 clear, or the byte on the chip's OAM bus while it renders | the bus driven whole; the address unmoved |
 | `$2005` | the first write coarse X into `t` and fine X into `x`, the second fine Y and coarse Y into `t`; the toggle flips; ignored in the warm-up | the bus | none |
 | `$2006` | the first write bits 13–8 of `t` with bit 14 cleared, the second its low byte and then the whole of `t` into `v`; the toggle flips; ignored in the warm-up | the bus | none |
-| `$2007` | the byte through the chip's address space at `v`, then `v` steps by 1 or 32 | the read buffer, or a palette entry at once under the bus's top two bits | the buffer refilled from `v`; the bus driven; `v` steps |
+| `$2007` | the byte through the chip's address space at `v`, then `v` steps by 1 or 32, on the fifth dot after the access | the read buffer, or a palette entry at once under the bus's top two bits | the bus driven; the buffer refilled from `v` and `v` stepped on the fifth dot after the access |
 
 (NESdev wiki, "PPU registers", MMIO registers, PPUCTRL, PPUMASK, PPUSTATUS, OAMADDR, OAMDATA,
 PPUSCROLL, PPUADDR, PPUDATA; "PPU scrolling", Register controls; "PPU OAM", Byte 2 - Attributes;
@@ -466,8 +512,9 @@ const neasant::PpuInputs inputs{board, cartridge, chrRam, 115200u};
 
 neasant::ppuWrite(chip, 6, 0x21, inputs);  // $2006: the address's high byte
 neasant::ppuWrite(chip, 6, 0x08, inputs);  // its low byte: v is now $2108
-neasant::ppuWrite(chip, 7, 0x5A, inputs);  // $2007: the byte lands at $2108 and v steps
-// chip.v == 0x2109
+neasant::ppuWrite(chip, 7, 0x5A, inputs);  // $2007: the chip takes a write to $2108
+for (int dot = 0; dot < 5; ++dot) neasant::ppuTickDot(chip, false, inputs);  // its five dots
+// chip.v == 0x2109: stepped on the fifth dot, where the byte landed
 // chip.ciram[0x108] == 0x5A: $2108 is byte $108 of the first kilobyte under horizontal
 //                            mirroring
 // chip.ioLatch == 0x5A: every port write loads the I/O bus
@@ -578,23 +625,32 @@ neasant::ppuWrite(chip, 6, 0xF0, inputs);  // second: the low byte, then the who
 
 ### $2007
 
-A write lands through the chip's address space at the low 14 bits of `v`: a palette entry when
-`v` is `$3F00` or above, otherwise the board or the console's nametable RAM
-([The address space](#the-address-space)). `v` then steps by 1 or 32, as `$2000` bit 2 says,
-wrapping inside its 15 bits. A read answers the read buffer and refills it from `v`, so a read
-lags one access behind the address. A palette address is the exception, answered at once under
-the bus's top two bits while the read underneath fills the buffer (NESdev wiki, "PPU registers",
-PPUDATA, The PPUDATA read buffer and Reading palette RAM).
+A `$2007` access is taken in the dot under way and made on the chip's own dots: on the third
+dot after the access the chip drives its address lines and the console's latch from the low 14
+bits of `v` and presents the board the address alone, and on the fifth a read loads the read
+buffer from that address or a write lands there, and `v` steps by 1 or 32, as `$2000` bit 2 says,
+wrapping inside its 15 bits ([The pins](#the-pins)). A write lands through the chip's
+address space: a palette entry when `v` is `$3F00` or above, otherwise the board or the console's
+nametable RAM ([The address space](#the-address-space)). A read answers the read buffer as it
+stands at the access, so a read lags one access behind the address. A palette address is the
+exception, answered at once under the bus's top two bits while the read underneath fills the
+buffer on the fifth dot (NESdev wiki, "PPU registers", PPUDATA, The PPUDATA read buffer and
+Reading palette RAM; Visual 2C02).
 
 ```cpp
+neasant::ppuWrite(chip, 1, 0x00, inputs);  // rendering off: the dots below make no fetch
 cartridge.chrRom[0x10] = 0xA1;  // three CHR ROM bytes to read
 cartridge.chrRom[0x11] = 0xB2;
 cartridge.chrRom[0x12] = 0xC3;
 neasant::ppuWrite(chip, 6, 0x00, inputs);
 neasant::ppuWrite(chip, 6, 0x10, inputs);  // v is $0010
 const std::uint8_t stale = neasant::ppuRead(chip, 7, inputs);
-// stale == 0x00: the buffer as it stood; the read loads $A1 into it and steps v to $0011
+// stale == 0x00: the buffer as it stood; the chip holds the read
+// chip.dataAccess[0].kind == neasant::PpuDataAccessKind::Read and chip.readBuffer == 0x00
+for (int dot = 0; dot < 5; ++dot) neasant::ppuTickDot(chip, false, inputs);
+// chip.readBuffer == 0xA1 and chip.v == 0x0011: the read made on its fifth dot
 const std::uint8_t fresh = neasant::ppuRead(chip, 7, inputs);
+for (int dot = 0; dot < 5; ++dot) neasant::ppuTickDot(chip, false, inputs);
 // fresh == 0xA1, and the buffer now holds $B2
 // chip.readBuffer == 0xB2 and chip.v == 0x0012
 ```
@@ -664,13 +720,16 @@ storage of entry 0 of the background palette beside it, so `$3F10`, `$3F14`, `$3
 reach `$3F00`, `$3F04`, `$3F08` and `$3F0C`, and the 32 entries repeat through `$3FFF`. A read
 answers the entry at once under the bus's top two bits, with greyscale applied as `entry & $30`
 when `$2001` bit 0 is set; the entry itself keeps its bits (NESdev wiki, "PPU palettes", Palette
-RAM; "PPU registers", Reading palette RAM and Color control; "PPU memory map"). A palette access
-is not presented to the board.
+RAM; "PPU registers", Reading palette RAM and Color control; "PPU memory map"). A palette
+access's address is presented to the board on its address dot; a write's strobe dot presents
+nothing, `/WR` staying high, and a read's presents its read, which the console's RAM answers
+under NROM ([The pins](#the-pins)).
 
 ```cpp
 neasant::ppuWrite(chip, 6, 0x3F, inputs);
 neasant::ppuWrite(chip, 6, 0x10, inputs);  // v is $3F10
-neasant::ppuWrite(chip, 7, 0x21, inputs);  // lands at entry 0: $3F10 is the storage of $3F00
+neasant::ppuWrite(chip, 7, 0x21, inputs);  // for entry 0: $3F10 is the storage of $3F00
+for (int dot = 0; dot < 5; ++dot) neasant::ppuTickDot(chip, false, inputs);
 // chip.palette[0x00] == 0x21 and chip.palette[0x10] == 0x00
 chip.palette[0x05] = 0x2C;
 chip.ciram[0x705] = 0x77;  // the nametable byte underneath $3F05 under horizontal mirroring
@@ -679,7 +738,59 @@ neasant::ppuWrite(chip, 6, 0x05, inputs);
 neasant::ppuWrite(chip, 2, 0xC3, inputs);  // the bus's top two bits set
 const std::uint8_t entry = neasant::ppuRead(chip, 7, inputs);
 // entry == 0xEC: the entry at once, under the bus's top two bits
-// chip.readBuffer == 0x77: the read underneath fills the buffer
+for (int dot = 0; dot < 5; ++dot) neasant::ppuTickDot(chip, false, inputs);
+// chip.readBuffer == 0x77: the read underneath fills the buffer on the fifth dot
+```
+
+## The pins
+
+The board sees the chip's fourteen address lines, its two strobes and its data lines once for
+each dot the lines take a new value or a strobe is low ([the cartridge
+page](nes-cartridge.md#the-pins)). `addressPins` holds the lines as the chip last drove them and
+`addressLatch` the console's latch, the low eight bits an access's first dot put there: only an
+access's first dot, ALE, captures it. On a dot the chip makes no access on — rendering disabled,
+scanlines 240 to 260 but for dot 0 of 240, and dot 0 of the pre-render line — the lines carry
+the low 14 bits of `v`, taking a new value on the dot after `v` changes, and the latch keeps its
+byte (NESdev wiki, "PPU rendering", PPU address bus contents; "PPU pinout", Signal descriptions;
+Visual 2C02).
+
+A `$2007` access is one of the chip's accesses. The CPU's access falls on one of the four master
+cycles of the dot under way, `PpuInputs::accessCycle`, which [the
+machine](nes-machine.md#a-machine-cycle) sets from its alignment, 1, 0, 3 and 2 under alignments 0
+to 3, and a bare chip's caller leaves at 1. The chip takes the access and makes it three and five
+ticks on, one more each when the cycle is 0, the dot having yet to tick: on the address dot the
+lines and the latch take `v` and the board is presented the address alone; on the strobe dot the
+chip presents the read or the write, a palette write's excepted, and the buffer, the memory and `v`
+move. `dataAccess` holds the accesses taken and not yet made, two at most. Two accesses of a kind on
+adjacent CPU cycles meet: the second is taken in the first's address dot, and the first's strobe
+comes on the very next dot, unless the access falls on the dot's last master cycle, alignment 2,
+where the second is dropped; a read and a write on adjacent cycles each keep their dots. The
+console's own measure of this is blargg's `double_2007_read` and `dma_2007_read`, whose outputs the
+machine prints by alignment ([the APU page](apu.md#testing-against-the-programs)) (NESdev wiki, "PPU
+registers", The PPUDATA read buffer and Read conflict with DPCM samples; "DMA", Register conflicts;
+Visual 2C02).
+
+Across a picture line the chip drives 171 addresses, dot 0's among them, and address line 13
+rises 43 times; the pre-render line makes no access on dot 0 ([A line's dots](#a-lines-dots)).
+
+```cpp
+neasant::PpuState lines;  // on the same `inputs`
+lines.warmingUp = false;
+lines.addressLatch = 0xEE;
+neasant::ppuWrite(lines, 6, 0x0A, inputs);
+neasant::ppuWrite(lines, 6, 0x5C, inputs);  // v is $0A5C
+neasant::ppuTickDot(lines, false, inputs);
+// lines.addressPins == 0x0A5C and lines.addressLatch == 0xEE: the lines follow v; no ALE
+cartridge.chrRom[0x0A5C] = 0x99;
+const std::uint8_t held = neasant::ppuRead(lines, 7, inputs);  // on master cycle 1 of the dot
+// held == 0x00: the buffer as it stood
+// lines.dataAccess[0].dotsToAddress == 3 and lines.dataAccess[0].dotsToStrobe == 5
+for (int dot = 0; dot < 3; ++dot) neasant::ppuTickDot(lines, false, inputs);
+// lines.addressLatch == 0x5C: the address dot, ALE
+for (int dot = 0; dot < 2; ++dot) neasant::ppuTickDot(lines, false, inputs);
+// lines.readBuffer == 0x99 and lines.v == 0x0A5D: the strobe dot
+neasant::ppuTickDot(lines, false, inputs);
+// lines.addressPins == 0x0A5D: the lines follow the stepped v
 ```
 
 ## The frame
@@ -799,7 +910,8 @@ the pre-render line, which fetches as a line of the picture does and draws nothi
 An access to the chip's address space takes two dots. On the first the chip drives all fourteen
 address lines and the console's latch captures the low eight. On the second the low eight lines
 carry the data, the chip drives the high six, and the read is made at those six over the latch.
-`addressPins` and `addressLatch` are the lines and the latch as the background last drove them.
+`addressPins` and `addressLatch` are the lines and the latch as the chip last drove them ([The
+pins](#the-pins)).
 The board is presented on both dots: the address alone, with neither strobe low, and then the
 read ([the cartridge page](nes-cartridge.md#the-pins)). A tile is four accesses, each byte kept
 in its latch until the next of its kind:
@@ -1052,12 +1164,13 @@ byte enters the unit's register with the leftmost pixel at bit 0, which reverses
 sprite is flipped horizontally. A slot whose Y has no row on the line, the $FF of a slot no
 sprite filled or a sprite found for a line this is not, still has its two addresses driven,
 tile $FF's for the empty slot, and its unit's registers are loaded with 0. On scanline 261 the
-slots are scanline 239's and the line counts as −1, so no slot has a row there and every unit
-is loaded with 0: nothing shows on the first line of the picture (NESdev wiki, "PPU rendering",
-Cycles 257-320 and Pre-render scanline; "PPU sprite evaluation", Details, Cycles 257-320 and
-Notes; "PPU pattern tables", Addressing; "PPU OAM", Byte 1 - Tile/index and Byte 2 -
-Attributes; "PPU registers", OAMADDR, Values during rendering; Brad Taylor's NTSC 2C02
-technical reference, Details of object pattern fetch & render).
+slots are scanline 239's; the addresses driven take 261 for the line, so a $FF slot's row is 6,
+flipped by its $FF attribute to 1, while the units are loaded with 0 as for a line of −1:
+nothing shows on the first line of the picture (NESdev wiki, "PPU rendering", Cycles 257-320
+and Pre-render scanline; "PPU sprite evaluation", Details, Cycles 257-320 and Notes; "PPU
+pattern tables", Addressing; "PPU OAM", Byte 1 - Tile/index and Byte 2 - Attributes; "PPU
+registers", OAMADDR, Values during rendering; Brad Taylor's NTSC 2C02 technical reference,
+Details of object pattern fetch & render; Visual 2C02).
 
 ```cpp
 cartridge.chrRom[0x04E3] = 0x41; // row 3 of tile $4E, its low byte
@@ -1408,6 +1521,9 @@ programs](apu.md#testing-against-the-programs).
   `$2002` first.
 - **A `$2007` read lags one access, except the palette.** The first read after setting the
   address answers the buffer as it stood.
+- **A `$2007` access is made five dots after it is taken.** The buffer, the memory and `v` move
+  on the strobe dot; a case on a bare chip ticks five dots to see them. Two reads or two writes
+  on adjacent CPU cycles meet, and under alignment 2 the second is dropped.
 - **The I/O bus decays.** A value left on it is gone after the configured count; a read of a
   write-only port recharges nothing.
 - **`$2004` writes step the address and reads do not.**
@@ -1491,9 +1607,12 @@ by the documents the chip is built from.
    `oam_stress`'s readme has the console passing "only for one of the four random PPU-CPU
    synchronizations", and `oam_read`'s shows four patterns. A `$2003` write on this chip sets the
    address and leaves OAM as it is, and both programs pass.
-5. **Whether a palette write drives the PPU bus.** No document the chip is built from states that
-   the chip drives `/WR` for a write to `$3F00-$3FFF`; the chip presents a palette access to no
-   board.
+5. **The bytes the console answers on the second of two adjacent `$2007` reads.**
+   `double_2007_read` has four outputs for its two-cycle read, one per alignment on the console:
+   `22` twice, the buffer as it stood, `02`, the address's low byte on the lines, and `32`, `$33`
+   with bit 0 still `$22`'s. The chip answers the buffer as it stood under every alignment, so it
+   prints the first two outputs' CRCs and never the other two; which alignment prints which on a
+   console is not known.
 6. **The top-loader's reset.** The "PPU power up state" page says the Famicom and NES-101 reset
    the CPU alone; the machine's reset line resets both chips, the front-loader's.
 7. **The warm power-on.** The page's values for a console off under twenty seconds — PPUSTATUS
@@ -1529,11 +1648,9 @@ by the documents the chip is built from.
     applies that order to every dot: the latch captures before `v` moves, and the high six lines and
     a read are taken after. Only a write that changes `t` or `v` between the two dots of an access
     reaches the difference; a reading of the address lines on Visual 2C02 would settle it.
-14. **Dot 0's address.** The "PPU rendering" page has the address bus on dot 0 "appears to be" the
-    low pattern byte's that dot 5 then fetches, and its frame timing diagram marks dot 0 of
-    scanlines 0 to 240 as that address alone. The chip drives it as the first dot of an access, the
-    latch capturing it; whether ALE rises on that dot is not stated. Brad Taylor's reference counts
-    42 rises of address line 13 a scanline, which leaves none for a pattern address on dot 0.
+14. **The evaluation past sprite 63.** The "PPU sprite evaluation" page has the copy after the
+    wrap to sprite 0 "attempt (and fail)"; Visual 2C02 copies sprite 0 again when it is in range,
+    the next slot taking the last Y looked at. The chip copies nothing after the wrap.
 15. **Where the attribute byte's two bits are selected.** The "PPU rendering" page draws the
     selection at the reload, and Brad Taylor's reference has the two bits selected as the byte is
     latched, which the chip follows. The two differ only if bit 1 of `v`'s coarse X or of its coarse
@@ -1541,15 +1658,11 @@ by the documents the chip is built from.
 16. **The registers' decay.** The "PPU rendering" page has the fetch latches, the shift registers
     and the 1-bit latches decay to 0 "on a time scale of probably around 2 frames"; here they hold
     what they have for ever.
-17. **The pre-render line's sprites.** The "PPU rendering" page names the scanline -1 or 261 and has
-    its sprite fetches use what secondary OAM holds from scanline 239's evaluation; the "PPU OAM"
-    page and the "PPU sprite evaluation" page's notes have no sprite shown on the first line. The
-    chip compares every slot's Y against −1 there, so no slot has a row and every unit is loaded
-    with 0: the clear's $FF slots stay off line 0, as does a sprite scanline 239's evaluation found,
-    and `07.screen_bottom` measures a sprite at Y = 239 missing there on the console. The comparison
-    reaches a board in one place, the row bits of the addresses the pre-render line's sprite fetches
-    drive, −1 less Y against 261 less Y in their low three or four bits; a reading of the address
-    lines on Visual 2C02 would settle it.
+17. **The pre-render line's units.** The address lines take 261 for the line there (Visual
+    2C02), so a $FF slot's addresses carry row 6 flipped to 1 and a sprite scanline 239 found row
+    261 less its Y, while the units load 0 as for a line of −1, which keeps the clear's slots and
+    Y = 239 off line 0 as the pages and `07.screen_bottom` have it. Whether the chip's units load
+    by that comparison or by another means the pins do not show.
 18. **The dot of the 2C02G's OAM copy.** The "PPU sprite evaluation" page's notes and the "PPU
     registers" page's OAMADDR precautions state the copy's bytes, the eight at `oamAddr & $F8`, its
     destination, OAM's first eight, and its condition, an address of 8 or more as evaluation starts,
@@ -1597,6 +1710,9 @@ by the documents the chip is built from.
 - `tests/ppu/sprites_test.cpp` — the sprites' evaluation, output units and multiplexer dot by dot
   on the bare chip, drawn in the machine's picture, and blargg's sprite hit and sprite overflow
   programs.
+- `tests/ppu/bus_test.cpp` — the pins: the lines following `v`, a `$2007` access's dots, two
+  accesses on adjacent cycles, the dot's master cycle by the alignment, dot 0 and the pre-render
+  line's sprite fetch rows.
 
 ## Sources
 
@@ -1612,6 +1728,9 @@ by the documents the chip is built from.
   `sprite_overflow_tests`, with their readmes and sources, as the `christopherpow/nes-test-roms`
   repository at `https://github.com/christopherpow/nes-test-roms` collects them. The tables
   `ppu_vbl_nmi`'s readme prints for each program are published measurements of the console.
+- **Visual 2C02** — Quietust's transistor-level simulation of the 2C02, at
+  `https://www.qmtpro.com/~nes/chipimages/visual2c02/`, run for the `$2007` access's dots, the
+  lines while the chip makes no access, dot 0's ALE and the pre-render line's sprite fetch rows.
 - **The `ppudecay` test program** — lidnariq's, public domain (2023), with its source and its
   author's description of what it measures and what it reports on his console, published at
   `https://forums.nesdev.org/viewtopic.php?t=24639`.

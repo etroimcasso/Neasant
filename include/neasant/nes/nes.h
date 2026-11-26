@@ -519,6 +519,8 @@ class Nes {
   // RAM, the I/O bus decay in whole dots, and the picture's storage while a frame
   // observer is set.
   [[nodiscard]] PpuInputs ppuInputs() noexcept;
+  // The master cycle of the dot under way that this cycle's access falls on, 0 to 3.
+  [[nodiscard]] std::uint8_t accessCycle() const noexcept;
 
   NesState state_;
   Cpu6502 cpu_;
